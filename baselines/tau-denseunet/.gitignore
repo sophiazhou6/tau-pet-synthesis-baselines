@@ -1,0 +1,15 @@
+# Checkpoints, generated volumes, logs — large, regenerable
+results/checkpoints/
+results/generated/
+results/logs/
+results/figures/
+
+# Python
+__pycache__/
+*.pyc
+*.pt
+*.npy
+
+# Editor / OS
+.DS_Store
+.vscode/

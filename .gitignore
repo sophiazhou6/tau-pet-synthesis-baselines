@@ -1,0 +1,25 @@
+# Data & checkpoints — never committed (ADNI Data Use Agreement; see CLAUDE.md)
+data/
+**/data/raw/
+results/checkpoints/
+results/figures/
+results/generated/
+*.pt
+*.pth
+*.nii
+*.nii.gz
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+*.egg-info/
+
+# Editors / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Claude Code local config
+.claude/

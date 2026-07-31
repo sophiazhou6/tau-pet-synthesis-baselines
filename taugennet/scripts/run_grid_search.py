@@ -1,0 +1,651 @@
+#!/home/sz3962/.conda/envs/taugennet/bin/python3
+"""
+run_grid_search.py — three-stage coordinate-descent grid search.
+
+Stage 0 (screen) : AE-only sweep over latent_ch × kl_weight, ranked by *masked*
+                   AE reconstruction on each fold's val split (eval_ae_recon.py).
+                   Prunes to one best kl per latent_ch → finalists spanning
+                   {4,6,8} latent channels. Cheap; screen on 1-2 folds.
+Stage 1 (decide) : FULL AE + diffusion on the finalist (latent_ch, kl) pairs,
+                   5-fold CV, selected on mean diffusion val loss. This is where
+                   (latent_ch, kl) is actually chosen — recon cannot decide it,
+                   because recon always favours more channels + lower KL.
+Stage 2 (lr)     : diffusion-only LR sweep on the winning (latent_ch, kl).
+
+CV: every stage runs as a SLURM array over folds (one task per fold). Stage 0 may
+use fewer folds (--screen-folds) since it is only a prune; Stages 1-2 use --n-folds.
+The fixed 20% test set is never touched by any fold (see src/dataset_final.py).
+
+Scripts are generated into slurm/grid_search/ and NEVER submitted automatically.
+
+Usage:
+  # Stage 0 — generate AE-screen scripts (latent_ch × kl), then submit:
+  python scripts/run_grid_search.py --step 0 --screen-folds 2
+  sbatch slurm/grid_search/step0_lch4_kl1e-04.slurm    # ... one per (lch,kl)
+
+  # After Stage 0 jobs finish, rank recon and pick finalists (best kl per lch):
+  python scripts/run_grid_search.py --collect-step0
+
+  # Stage 1 — full diffusion on the finalists (reads step0_finalists.json):
+  python scripts/run_grid_search.py --step 1
+  sbatch slurm/grid_search/step1_lch4_kl1e-04.slurm    # ... one per finalist
+
+  # After Stage 1 jobs finish, pick best (latent_ch, kl) by diffusion val loss:
+  python scripts/run_grid_search.py --collect-step1
+
+  # Stage 2 — LR sweep on the winning (latent_ch, kl):
+  python scripts/run_grid_search.py --step 2
+  sbatch slurm/grid_search/step2_lr1e-04.slurm
+  python scripts/run_grid_search.py --collect-step2
+
+  # Local/dry-run smoke test (tiny epochs, 1 fold):
+  python scripts/run_grid_search.py --step 0 --dry-run
+  python scripts/run_grid_search.py --step 1 --pairs 8:1e-4 --local --ae-epochs 2 --diff-epochs 5 --n-folds 1
+"""
+import argparse
+import json
+import os
+import subprocess
+import sys
+import textwrap
+
+# Portable: override per-cluster via env vars; defaults reproduce the Princeton setup.
+PYTHON    = os.environ.get("TAUGENNET_PYTHON", "/home/sz3962/.conda/envs/taugennet/bin/python3")
+ROOT      = os.environ.get("TAUGENNET_ROOT", "/scratch/network/sz3962/taugennet")
+PARTITION = os.environ.get("TAUGENNET_PARTITION", "gpu")
+GRES      = os.environ.get("TAUGENNET_GRES", "gpu:nvidia_a100:1")
+MAIL_USER = os.environ.get("TAUGENNET_MAIL", "sz3962@princeton.edu")
+SLURM_DIR = os.path.join(ROOT, "slurm/grid_search")
+STATE_DIR = os.path.join(ROOT, "results/grid_search")
+STEP0_FINALISTS = os.path.join(STATE_DIR, "step0_finalists.json")
+STEP1_BEST      = os.path.join(STATE_DIR, "step1_best.json")
+
+LATENT_CH_VALUES = [4, 6, 8]
+KL_VALUES        = [1e-5, 1e-4, 1e-3]
+LR_VALUES        = [5e-5, 1e-4, 2e-4]
+DEFAULT_LR       = 1e-4
+MODE             = "atrophy"
+RECON_METRIC_KEYS = ["mse", "mae", "nrmse", "pearson", "ssim"]
+# Lower-is-better recon metrics (selection direction).
+_LOWER_BETTER = {"mse", "mae", "nrmse"}
+
+
+def fmt(v):
+    return f"{v:.0e}"
+
+
+def lch_tag(lch):
+    return str(int(lch))
+
+
+def _tag(lch, kl):
+    return f"lch{lch_tag(lch)}_kl{fmt(kl)}"
+
+
+# ── SLURM script generation ────────────────────────────────────────────────────
+
+def _slurm_header(job_name, array_n, log_prefix, walltime="12:00:00", gpu_constraint=None):
+    # gpu_constraint (e.g. "gpu80|v100") lets cheap jobs run on the A100-80 OR the V100,
+    # avoiding the 20GB MIG slice. Uses untyped gpu:1 so either GPU type matches.
+    gres  = "gpu:1" if gpu_constraint else GRES
+    extra = f"\n        #SBATCH --constraint={gpu_constraint}" if gpu_constraint else ""
+    return textwrap.dedent(f"""\
+        #!/bin/bash
+        #SBATCH --job-name={job_name}
+        #SBATCH --array=0-{array_n - 1}
+        #SBATCH --partition={PARTITION}
+        #SBATCH --nodes=1
+        #SBATCH --ntasks=1
+        #SBATCH --cpus-per-task=8
+        #SBATCH --gres={gres}{extra}
+        #SBATCH --mem=64G
+        #SBATCH --time={walltime}
+        #SBATCH --output=results/logs/{log_prefix}_%A_%a.out
+        #SBATCH --error=results/logs/{log_prefix}_%A_%a.err
+        #SBATCH --mail-type=END,FAIL
+        #SBATCH --mail-user={MAIL_USER}
+    """)
+
+
+def slurm_script_step0(lch, kl, n_folds, screen_folds, ae_epochs, ae_patience,
+                       ae_val_every):
+    """AE-only screen: train AE(lch,kl) per fold, then score masked recon on val."""
+    tag    = _tag(lch, kl)
+    # AE training at full res (batch 8) needs ~30 GB -> A100-80 only (OOMs on the 32 GB V100).
+    header = _slurm_header(f"gs_s0_{tag}", screen_folds, f"gs_s0_{tag}",
+                           walltime="04:30:00")
+    base   = f"results/checkpoints/grid_search/step0/{tag}/fold_${{FOLD}}"
+    return header + textwrap.dedent(f"""
+        # Grid search Stage 0 (screen): latent_ch={lch}, kl_weight={kl}, AE-only.
+        # One array task per screened fold (screen_folds={screen_folds} of {n_folds}).
+        # Generated by run_grid_search.py --step 0 — do NOT edit by hand.
+
+        PYTHON={PYTHON}
+        FOLD=$SLURM_ARRAY_TASK_ID
+        N_FOLDS={n_folds}
+        AE_CKPT={base}/taugennet_checkpoint.pt
+        AE_BEST={base}/taugennet_checkpoint_best.pt
+        METRICS={base}/recon_metrics.json
+
+        cd {ROOT}
+        mkdir -p results/logs {base}
+
+        echo "=== Stage 0: {tag}, fold ${{FOLD}}/${{N_FOLDS}} (AE screen) ==="
+        echo "Job: $SLURM_JOB_ID  Array: $SLURM_ARRAY_TASK_ID  Node: $SLURM_NODELIST  Start: $(date)"
+        nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+        echo ""
+        set -e   # fail loudly: if AE training crashes, the job FAILS (not fake-COMPLETED)
+
+        echo "=== AE training ==="
+        $PYTHON scripts/train.py \\
+            --mode {MODE} \\
+            --fold $FOLD --n-folds $N_FOLDS \\
+            --ae-epochs {ae_epochs} --diff-epochs 0 \\
+            --latent-ch {lch} --kl-weight {kl} \\
+            --patience {ae_patience} --ae-val-every {ae_val_every} \\
+            --ae-checkpoint $AE_CKPT
+
+        echo "=== Masked recon on val (selection metric) ==="
+        $PYTHON scripts/eval_ae_recon.py \\
+            --checkpoint $AE_BEST \\
+            --mode {MODE} \\
+            --fold $FOLD --n-folds $N_FOLDS --split val \\
+            --use-mask --no-figures \\
+            --metrics-out $METRICS
+
+        echo "Fold ${{FOLD}} complete. End: $(date)"
+    """)
+
+
+def slurm_script_step1(lch, kl, n_folds, ae_epochs, diff_epochs, patience):
+    """Decide: full AE + diffusion for one finalist (latent_ch, kl) pair."""
+    tag    = _tag(lch, kl)
+    header = _slurm_header(f"gs_s1_{tag}", n_folds, f"gs_s1_{tag}")
+    base   = f"results/checkpoints/grid_search/step1/{tag}/fold_${{FOLD}}"
+    return header + textwrap.dedent(f"""
+        # Grid search Stage 1 (decide): latent_ch={lch}, kl_weight={kl}, full pipeline.
+        # One array task per fold. Generated by run_grid_search.py --step 1.
+
+        PYTHON={PYTHON}
+        FOLD=$SLURM_ARRAY_TASK_ID
+        N_FOLDS={n_folds}
+        AE_CKPT={base}/taugennet_checkpoint.pt
+
+        cd {ROOT}
+        mkdir -p results/logs {base}/atrophy
+
+        echo "=== Stage 1: {tag}, fold ${{FOLD}}/${{N_FOLDS}} (AE + diffusion) ==="
+        echo "Job: $SLURM_JOB_ID  Array: $SLURM_ARRAY_TASK_ID  Node: $SLURM_NODELIST  Start: $(date)"
+        nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+        echo ""
+
+        echo "=== AE training ==="
+        $PYTHON scripts/train.py \\
+            --mode {MODE} \\
+            --fold $FOLD --n-folds $N_FOLDS \\
+            --ae-epochs {ae_epochs} --diff-epochs 0 \\
+            --latent-ch {lch} --kl-weight {kl} \\
+            --ae-checkpoint $AE_CKPT
+        echo "AE done at: $(date)"
+
+        echo "=== Diffusion training ==="
+        $PYTHON scripts/train.py \\
+            --mode {MODE} \\
+            --fold $FOLD --n-folds $N_FOLDS \\
+            --skip-ae --ae-checkpoint $AE_CKPT \\
+            --checkpoint-dir {base}/atrophy \\
+            --latent-ch {lch} --kl-weight {kl} \\
+            --diff-epochs {diff_epochs} --patience {patience} \\
+            --val-every 1 --monitor-every 50 \\
+            --lr {DEFAULT_LR}
+        echo "Fold ${{FOLD}} complete. End: $(date)"
+    """)
+
+
+def slurm_script_step2(lr, best_lch, best_kl, n_folds, diff_epochs, patience):
+    """LR sweep: diffusion-only, reusing the Stage-1 AE for the winning (lch,kl)."""
+    lr_t   = fmt(lr)
+    tag    = _tag(best_lch, best_kl)
+    header = _slurm_header(f"gs_s2_lr{lr_t}", n_folds, f"gs_s2_lr{lr_t}")
+    s1base = f"results/checkpoints/grid_search/step1/{tag}/fold_${{FOLD}}"
+    out    = f"results/checkpoints/grid_search/step2/lr{lr_t}/fold_${{FOLD}}/atrophy"
+    return header + textwrap.dedent(f"""
+        # Grid search Stage 2: lr={lr}, latent_ch={best_lch}, kl_weight={best_kl} (best from Stage 1).
+        # Diffusion only — reuses Stage-1 AE checkpoints. Generated by run_grid_search.py --step 2.
+
+        PYTHON={PYTHON}
+        FOLD=$SLURM_ARRAY_TASK_ID
+        N_FOLDS={n_folds}
+        AE_CKPT={s1base}/taugennet_checkpoint.pt
+
+        cd {ROOT}
+        mkdir -p results/logs {out}
+
+        echo "=== Stage 2: lr={lr}, {tag}, fold ${{FOLD}}/${{N_FOLDS}} ==="
+        echo "Job: $SLURM_JOB_ID  Array: $SLURM_ARRAY_TASK_ID  Node: $SLURM_NODELIST  Start: $(date)"
+        nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+        echo ""
+
+        echo "=== Diffusion training (AE reused from Stage 1) ==="
+        $PYTHON scripts/train.py \\
+            --mode {MODE} \\
+            --fold $FOLD --n-folds $N_FOLDS \\
+            --skip-ae --ae-checkpoint $AE_CKPT \\
+            --checkpoint-dir {out} \\
+            --latent-ch {best_lch} --kl-weight {best_kl} \\
+            --diff-epochs {diff_epochs} --patience {patience} \\
+            --val-every 1 --monitor-every 50 \\
+            --lr {lr}
+        echo "Fold ${{FOLD}} complete. End: $(date)"
+    """)
+
+
+def write_scripts(paths_and_text):
+    os.makedirs(SLURM_DIR, exist_ok=True)
+    for path, text in paths_and_text:
+        with open(path, "w") as f:
+            f.write(text)
+        os.chmod(path, 0o755)
+        print(f"  Written: {path}")
+
+
+# ── local command builders (for --local / --dry-run) ────────────────────────────
+
+def build_cmds_step0(fold, n_folds, lch, kl, ae_epochs, ae_patience, ae_val_every):
+    tag  = _tag(lch, kl)
+    base = f"results/checkpoints/grid_search/step0/{tag}/fold_{fold}"
+    ae   = f"{base}/taugennet_checkpoint.pt"
+    best = f"{base}/taugennet_checkpoint_best.pt"
+    return [
+        [PYTHON, "scripts/train.py", "--mode", MODE,
+         "--fold", str(fold), "--n-folds", str(n_folds),
+         "--ae-epochs", str(ae_epochs), "--diff-epochs", "0",
+         "--latent-ch", str(lch), "--kl-weight", str(kl),
+         "--patience", str(ae_patience), "--ae-val-every", str(ae_val_every),
+         "--ae-checkpoint", ae],
+        [PYTHON, "scripts/eval_ae_recon.py", "--checkpoint", best,
+         "--mode", MODE, "--fold", str(fold), "--n-folds", str(n_folds),
+         "--split", "val", "--use-mask", "--no-figures",
+         "--metrics-out", f"{base}/recon_metrics.json"],
+    ]
+
+
+def build_cmds_step1(fold, n_folds, lch, kl, ae_epochs, diff_epochs, patience):
+    tag  = _tag(lch, kl)
+    base = f"results/checkpoints/grid_search/step1/{tag}/fold_{fold}"
+    ae   = f"{base}/taugennet_checkpoint.pt"
+    return [
+        [PYTHON, "scripts/train.py", "--mode", MODE,
+         "--fold", str(fold), "--n-folds", str(n_folds),
+         "--ae-epochs", str(ae_epochs), "--diff-epochs", "0",
+         "--latent-ch", str(lch), "--kl-weight", str(kl),
+         "--ae-checkpoint", ae],
+        [PYTHON, "scripts/train.py", "--mode", MODE,
+         "--fold", str(fold), "--n-folds", str(n_folds),
+         "--skip-ae", "--ae-checkpoint", ae,
+         "--checkpoint-dir", f"{base}/atrophy",
+         "--latent-ch", str(lch), "--kl-weight", str(kl),
+         "--diff-epochs", str(diff_epochs), "--patience", str(patience),
+         "--val-every", "1", "--monitor-every", "50", "--lr", str(DEFAULT_LR)],
+    ]
+
+
+def build_cmds_step2(fold, n_folds, lr, best_lch, best_kl, diff_epochs, patience):
+    tag    = _tag(best_lch, best_kl)
+    ae     = f"results/checkpoints/grid_search/step1/{tag}/fold_{fold}/taugennet_checkpoint.pt"
+    out    = f"results/checkpoints/grid_search/step2/lr{fmt(lr)}/fold_{fold}/atrophy"
+    return [
+        [PYTHON, "scripts/train.py", "--mode", MODE,
+         "--fold", str(fold), "--n-folds", str(n_folds),
+         "--skip-ae", "--ae-checkpoint", ae, "--checkpoint-dir", out,
+         "--latent-ch", str(best_lch), "--kl-weight", str(best_kl),
+         "--diff-epochs", str(diff_epochs), "--patience", str(patience),
+         "--val-every", "1", "--monitor-every", "50", "--lr", str(lr)],
+    ]
+
+
+# ── result collection ──────────────────────────────────────────────────────────
+
+def _read_json(path):
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"  Warning: could not read {path}: {e}", file=sys.stderr)
+        return None
+
+
+def _mean_std(vals):
+    n = len(vals)
+    if n == 0:
+        return float("inf"), 0.0, 0
+    mean = sum(vals) / n
+    std  = (sum((x - mean) ** 2 for x in vals) / n) ** 0.5 if n > 1 else 0.0
+    return mean, std, n
+
+
+def _best_val_loss_from_ckpt(ckpt_path):
+    """Min diffusion val loss from a *_best.pt checkpoint, or None if missing."""
+    if not os.path.exists(ckpt_path):
+        return None
+    try:
+        import torch
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+        val_losses = ckpt.get("diff_val_losses", [])
+        return min(v for _, v in val_losses) if val_losses else None
+    except Exception as e:
+        print(f"  Warning: could not load {ckpt_path}: {e}", file=sys.stderr)
+        return None
+
+
+def collect_step0(latent_ch_values, kl_values, n_folds, screen_folds, sel_key, top_kl):
+    """Rank masked recon over (latent_ch × kl); keep best kl per latent_ch as finalists."""
+    lower_better = sel_key in _LOWER_BETTER
+    print(f"\nStage 0 — masked recon screen (selection metric: {sel_key.upper()}, "
+          f"{'lower' if lower_better else 'higher'} is better, folds=0..{screen_folds-1})")
+    table = {}  # (lch,kl) -> {sel_mean, sel_std, n, metrics:{...mean...}}
+    for lch in latent_ch_values:
+        for kl in kl_values:
+            tag = _tag(lch, kl)
+            per_metric = {m: [] for m in RECON_METRIC_KEYS}
+            for fold in range(screen_folds):
+                d = _read_json(f"results/checkpoints/grid_search/step0/{tag}/"
+                               f"fold_{fold}/recon_metrics.json")
+                if d is None:
+                    print(f"  Missing: {tag} fold {fold}")
+                    continue
+                for m in RECON_METRIC_KEYS:
+                    if d.get(m) is not None:
+                        per_metric[m].append(float(d[m]))
+            mean, std, n = _mean_std(per_metric[sel_key])
+            table[(lch, kl)] = {
+                "sel_mean": mean, "sel_std": std, "n": n,
+                "metrics": {m: (_mean_std(v)[0] if v else float("nan"))
+                            for m, v in per_metric.items()},
+            }
+
+    hdr = f"{'latent_ch':>9} {'kl':>9} {'folds':>5} " + " ".join(f"{m:>8}" for m in RECON_METRIC_KEYS)
+    print("\n" + hdr); print("-" * len(hdr))
+    for lch in latent_ch_values:
+        for kl in kl_values:
+            r = table[(lch, kl)]
+            cells = " ".join(f"{r['metrics'][m]:>8.4f}" for m in RECON_METRIC_KEYS)
+            print(f"{lch:>9} {fmt(kl):>9} {r['n']:>5} {cells}")
+
+    finalists = []
+    for lch in latent_ch_values:
+        cands = [(kl, table[(lch, kl)]) for kl in kl_values if table[(lch, kl)]["n"] > 0]
+        if not cands:
+            print(f"  No results for latent_ch={lch}; skipping", file=sys.stderr)
+            continue
+        cands.sort(key=lambda x: x[1]["sel_mean"], reverse=not lower_better)
+        for kl, r in cands[:top_kl]:
+            finalists.append([int(lch), float(kl)])
+            print(f"  finalist: latent_ch={lch}  kl={fmt(kl)}  "
+                  f"{sel_key}={r['sel_mean']:.4f}±{r['sel_std']:.4f}")
+
+    if not finalists:
+        print("\nNo finalists — run Stage 0 training first.", file=sys.stderr)
+        sys.exit(1)
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(STEP0_FINALISTS, "w") as f:
+        json.dump({"finalists": finalists, "sel_key": sel_key}, f, indent=2)
+    print(f"\nSaved {len(finalists)} finalists → {STEP0_FINALISTS}")
+    print("Next: python scripts/run_grid_search.py --step 1")
+    return finalists
+
+
+def collect_step1(finalists, n_folds):
+    """Pick best (latent_ch, kl) by mean diffusion val loss over folds."""
+    print("\nStage 1 — diffusion val loss over finalists")
+    results = {}
+    for lch, kl in finalists:
+        tag = _tag(lch, kl)
+        losses = []
+        for fold in range(n_folds):
+            ckpt = (f"results/checkpoints/grid_search/step1/{tag}/"
+                    f"fold_{fold}/atrophy/diff_atrophy_best.pt")
+            loss = _best_val_loss_from_ckpt(ckpt)
+            if loss is not None:
+                losses.append(loss)
+            else:
+                print(f"  Missing or empty: {ckpt}")
+        results[(lch, kl)] = _mean_std(losses)
+
+    print(f"\n{'latent_ch':>9} {'kl':>9} {'folds':>5} {'mean_val_loss':>14} {'std':>10}")
+    print("-" * 52)
+    for (lch, kl), (mean, std, n) in results.items():
+        print(f"{lch:>9} {fmt(kl):>9} {n:>5} {mean:>14.6f} {std:>10.6f}")
+
+    valid = {p: v for p, v in results.items() if v[2] > 0}
+    if not valid:
+        print("\nNo results found — run Stage 1 training first.", file=sys.stderr)
+        sys.exit(1)
+    (best_lch, best_kl), (best_mean, _, _) = min(valid.items(), key=lambda kv: kv[1][0])
+    print(f"\nBest: latent_ch={best_lch}  kl={fmt(best_kl)}  (mean val loss = {best_mean:.6f})")
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(STEP1_BEST, "w") as f:
+        json.dump({"best_latent_ch": int(best_lch), "best_kl": float(best_kl),
+                   "mean_val_loss": best_mean}, f, indent=2)
+    print(f"Saved → {STEP1_BEST}")
+    print("Next: python scripts/run_grid_search.py --step 2")
+    return best_lch, best_kl
+
+
+def collect_step2(lr_values, best_lch, best_kl, n_folds):
+    print(f"\nStage 2 — lr sweep (latent_ch={best_lch}, kl={fmt(best_kl)})")
+    results = {}
+    for lr in lr_values:
+        losses = []
+        for fold in range(n_folds):
+            ckpt = (f"results/checkpoints/grid_search/step2/lr{fmt(lr)}/"
+                    f"fold_{fold}/atrophy/diff_atrophy_best.pt")
+            loss = _best_val_loss_from_ckpt(ckpt)
+            if loss is not None:
+                losses.append(loss)
+            else:
+                print(f"  Missing or empty: {ckpt}")
+        results[lr] = _mean_std(losses)
+
+    print(f"\n{'lr':>10} {'folds':>5} {'mean_val_loss':>14} {'std':>10}")
+    print("-" * 44)
+    for lr in lr_values:
+        mean, std, n = results[lr]
+        print(f"{fmt(lr):>10} {n:>5} {mean:>14.6f} {std:>10.6f}")
+
+    valid = {lr: v for lr, v in results.items() if v[2] > 0}
+    if not valid:
+        print("\nNo results found — run Stage 2 training first.", file=sys.stderr)
+        sys.exit(1)
+    best_lr = min(valid, key=lambda k: valid[k][0])
+    print(f"\nBest lr: {fmt(best_lr)}  (mean val loss = {valid[best_lr][0]:.6f})")
+    print(f"\nFinal recommendation: --latent-ch {best_lch} --kl-weight {best_kl} --lr {best_lr}")
+
+
+# ── finalist / best loaders ─────────────────────────────────────────────────────
+
+def _parse_pairs(pairs):
+    out = []
+    for p in pairs:
+        lch, kl = p.split(":")
+        out.append([int(lch), float(kl)])
+    return out
+
+
+def _load_finalists(pairs_override=None):
+    if pairs_override:
+        return _parse_pairs(pairs_override)
+    data = _read_json(STEP0_FINALISTS)
+    if data is None:
+        print(f"Finalists file not found: {STEP0_FINALISTS}", file=sys.stderr)
+        print("Run --collect-step0 first, or pass --pairs lch:kl ...", file=sys.stderr)
+        sys.exit(1)
+    return data["finalists"]
+
+
+def _load_best_ae(lch_override=None, kl_override=None):
+    if lch_override is not None and kl_override is not None:
+        return lch_override, kl_override
+    data = _read_json(STEP1_BEST)
+    if data is None:
+        print(f"Stage 1 state file not found: {STEP1_BEST}", file=sys.stderr)
+        print("Run --collect-step1 first, or pass --latent-ch and --kl-weight.", file=sys.stderr)
+        sys.exit(1)
+    return data["best_latent_ch"], data["best_kl"]
+
+
+def _run_cmds(cmds, dry_run):
+    for cmd in cmds:
+        print("  " + " ".join(str(c) for c in cmd))
+        if not dry_run:
+            subprocess.run(cmd, cwd=ROOT, check=True)
+
+
+# ── CLI ────────────────────────────────────────────────────────────────────────
+
+def parse_args():
+    p = argparse.ArgumentParser(
+        description="Three-stage grid search: latent_ch×kl screen → diffusion decide → lr.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument("--step", type=int, choices=[0, 1, 2],
+                   help="Generate SLURM scripts for stage 0 (AE screen), 1 (decide), or 2 (lr).")
+    p.add_argument("--collect-step0", action="store_true",
+                   help="Rank Stage 0 recon, write finalists (best kl per latent_ch).")
+    p.add_argument("--collect-step1", action="store_true",
+                   help="Pick best (latent_ch, kl) from Stage 1 diffusion val loss.")
+    p.add_argument("--collect-step2", action="store_true",
+                   help="Print Stage 2 lr summary table.")
+    p.add_argument("--latent-ch-values", nargs="+", type=int, default=LATENT_CH_VALUES,
+                   metavar="LCH", help="latent_ch values for Stage 0 (default: 4 6 8)")
+    p.add_argument("--kl-values", nargs="+", type=float, default=KL_VALUES, metavar="KL",
+                   help="kl_weight values for Stage 0 (default: 1e-5 1e-4 1e-3)")
+    p.add_argument("--lr-values", nargs="+", type=float, default=LR_VALUES, metavar="LR",
+                   help="LR values for Stage 2 (default: 5e-5 1e-4 2e-4)")
+    p.add_argument("--n-folds",      type=int, default=5, help="Folds for Stages 1-2 CV.")
+    p.add_argument("--screen-folds", type=int, default=None,
+                   help="Folds to run in Stage 0 (default: n-folds). Use 1-2 for a cheap screen.")
+    p.add_argument("--sel-metric",   default="nrmse", choices=RECON_METRIC_KEYS,
+                   help="Stage 0 selection metric (default: nrmse).")
+    p.add_argument("--top-kl",       type=int, default=1,
+                   help="Finalists kept per latent_ch in Stage 0 (default: 1 best kl).")
+    p.add_argument("--ae-epochs",    type=int, default=500)
+    p.add_argument("--ae-patience",  type=int, default=100,
+                   help="Early-stopping patience (epochs) for AE training in Stage 0.")
+    p.add_argument("--ae-val-every", type=int, default=1,
+                   help="AE validation cadence (epochs) in Stage 0; diffusion unaffected.")
+    p.add_argument("--diff-epochs",  type=int, default=2000)
+    p.add_argument("--patience",     type=int, default=50)
+    p.add_argument("--pairs",        nargs="+", default=None, metavar="LCH:KL",
+                   help="Stage 1 override: explicit (latent_ch, kl) finalists, e.g. 8:1e-4 6:1e-5.")
+    p.add_argument("--latent-ch",    type=int, default=None,
+                   help="Stage 2 override: fixed latent_ch (bypass Stage 1 state).")
+    p.add_argument("--kl-weight",    type=float, default=None,
+                   help="Stage 2 override: fixed kl_weight (bypass Stage 1 state).")
+    p.add_argument("--local",   action="store_true", help="Run sequentially in-process (no SLURM).")
+    p.add_argument("--dry-run", action="store_true", help="Print commands without executing.")
+    return p.parse_args()
+
+
+def main():
+    args = parse_args()
+    screen_folds = args.screen_folds or args.n_folds
+
+    if args.collect_step0:
+        collect_step0(args.latent_ch_values, args.kl_values, args.n_folds,
+                      screen_folds, args.sel_metric, args.top_kl)
+        return
+    if args.collect_step1:
+        collect_step1(_load_finalists(args.pairs), args.n_folds)
+        return
+    if args.collect_step2:
+        best_lch, best_kl = _load_best_ae(args.latent_ch, args.kl_weight)
+        collect_step2(args.lr_values, best_lch, best_kl, args.n_folds)
+        return
+
+    if args.step == 0:
+        combos = [(lch, kl) for lch in args.latent_ch_values for kl in args.kl_values]
+        print(f"Stage 0: latent_ch×kl screen {[ _tag(l,k) for l,k in combos ]}, "
+              f"screen_folds={screen_folds} of {args.n_folds}  "
+              f"({len(combos) * screen_folds} AE runs)")
+        print(f"\nGenerating SLURM scripts → {SLURM_DIR}/")
+        write_scripts([
+            (os.path.join(SLURM_DIR, f"step0_{_tag(lch, kl)}.slurm"),
+             slurm_script_step0(lch, kl, args.n_folds, screen_folds,
+                                args.ae_epochs, args.ae_patience, args.ae_val_every))
+            for lch, kl in combos
+        ])
+        print("\nSubmit manually:")
+        for lch, kl in combos:
+            print(f"  sbatch slurm/grid_search/step0_{_tag(lch, kl)}.slurm")
+        if args.local or args.dry_run:
+            tag = "DRY RUN" if args.dry_run else "LOCAL"
+            print(f"\n{tag}:")
+            for lch, kl in combos:
+                for fold in range(screen_folds):
+                    print(f"\n  [{_tag(lch, kl)}, fold={fold}]")
+                    _run_cmds(build_cmds_step0(fold, args.n_folds, lch, kl,
+                                               args.ae_epochs, args.ae_patience,
+                                               args.ae_val_every),
+                              args.dry_run)
+        return
+
+    if args.step == 1:
+        finalists = _load_finalists(args.pairs)
+        print(f"Stage 1: full diffusion on finalists {[ _tag(l,k) for l,k in finalists ]}, "
+              f"{args.n_folds} folds  ({len(finalists) * args.n_folds} runs)")
+        print(f"\nGenerating SLURM scripts → {SLURM_DIR}/")
+        write_scripts([
+            (os.path.join(SLURM_DIR, f"step1_{_tag(lch, kl)}.slurm"),
+             slurm_script_step1(lch, kl, args.n_folds, args.ae_epochs,
+                                args.diff_epochs, args.patience))
+            for lch, kl in finalists
+        ])
+        print("\nSubmit manually:")
+        for lch, kl in finalists:
+            print(f"  sbatch slurm/grid_search/step1_{_tag(lch, kl)}.slurm")
+        if args.local or args.dry_run:
+            tag = "DRY RUN" if args.dry_run else "LOCAL"
+            print(f"\n{tag}:")
+            for lch, kl in finalists:
+                for fold in range(args.n_folds):
+                    print(f"\n  [{_tag(lch, kl)}, fold={fold}]")
+                    _run_cmds(build_cmds_step1(fold, args.n_folds, lch, kl,
+                                               args.ae_epochs, args.diff_epochs, args.patience),
+                              args.dry_run)
+        return
+
+    if args.step == 2:
+        best_lch, best_kl = _load_best_ae(args.latent_ch, args.kl_weight)
+        print(f"Stage 2: lr sweep {[fmt(v) for v in args.lr_values]}, "
+              f"latent_ch={best_lch}, kl={fmt(best_kl)}, {args.n_folds} folds  "
+              f"({len(args.lr_values) * args.n_folds} runs)")
+        print(f"\nGenerating SLURM scripts → {SLURM_DIR}/")
+        write_scripts([
+            (os.path.join(SLURM_DIR, f"step2_lr{fmt(lr)}.slurm"),
+             slurm_script_step2(lr, best_lch, best_kl, args.n_folds,
+                                args.diff_epochs, args.patience))
+            for lr in args.lr_values
+        ])
+        print("\nSubmit manually:")
+        for lr in args.lr_values:
+            print(f"  sbatch slurm/grid_search/step2_lr{fmt(lr)}.slurm")
+        if args.local or args.dry_run:
+            tag = "DRY RUN" if args.dry_run else "LOCAL"
+            print(f"\n{tag}:")
+            for lr in args.lr_values:
+                for fold in range(args.n_folds):
+                    print(f"\n  [lr={fmt(lr)}, fold={fold}]")
+                    _run_cmds(build_cmds_step2(fold, args.n_folds, lr, best_lch, best_kl,
+                                               args.diff_epochs, args.patience),
+                              args.dry_run)
+        return
+
+    print("Specify --step 0|1|2 or --collect-step0|1|2.", file=sys.stderr)
+    sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

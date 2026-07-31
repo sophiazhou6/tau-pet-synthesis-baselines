@@ -1,0 +1,878 @@
+import os
+import numpy as np
+import torch
+import matplotlib.pyplot as plt
+import pandas as pd
+from tqdm import tqdm
+from skimage.metrics import structural_similarity as ssim
+from scipy.stats import pearsonr
+
+from src.config import DEVICE, VOL_SHAPE, FIGURES_DIR
+from src import dataset_final as _dataset_v2
+from src import dataset_combined as _dataset_combined
+from src.diffusion import DiffusionSchedule
+from src.inference import load_models, synthesize_tau_pet, synthesize_no_mri
+
+
+# ── ROI definitions (approximate bounding boxes as fractions of VOL_SHAPE) ───
+ROI_DEFS = {
+    "Parahippocampal":   (0.40, 0.55, 0.35, 0.65, 0.30, 0.55),
+    "Fusiform":          (0.45, 0.60, 0.30, 0.70, 0.25, 0.50),
+    "Inferior Temporal": (0.30, 0.55, 0.25, 0.75, 0.20, 0.55),
+    "Hippocampus":       (0.42, 0.52, 0.40, 0.60, 0.35, 0.50),
+    "Post. Cingulate":   (0.40, 0.55, 0.38, 0.62, 0.50, 0.70),
+    "Entorhinal":        (0.43, 0.55, 0.38, 0.62, 0.28, 0.45),
+}
+PLASMA_BINS = [(0, 2), (2, 4), (4, 6), (6, 8), (10, float("inf"))]
+BIN_LABELS  = ["0-2", "2-4", "4-6", "6-8", "10+"]
+
+# All 5 metrics computed everywhere (whole brain AND per ROI).
+ROI_METRIC_KEYS = ["pearson", "nrmse", "ssim", "mse", "mae"]
+
+H, W, D = VOL_SHAPE
+
+
+def _safe_ssim(r, g):
+    """SSIM with an adaptive window so small ROI crops don't crash.
+
+    skimage's default win_size=7 requires every dimension >= 7; ROI crops
+    (e.g. hippocampus) can be smaller, so shrink the window to the smallest
+    odd size that fits. Returns NaN if the crop is too small for SSIM.
+    """
+    win = min(7, min(r.shape))
+    if win % 2 == 0:
+        win -= 1
+    if win < 3:
+        return float("nan")
+    return float(ssim(r, g, data_range=1.0, win_size=win))
+
+
+def roi_metrics_per_subject(real_vol, gen_vol, roi):
+    """Computes voxel-level metrics within an ROI for a SINGLE subject.
+
+    Returns all 5 metrics (pearson, nrmse, ssim, mse, mae) for this one
+    subject's ROI crop. Cross-subject aggregation happens elsewhere by
+    averaging these per-subject values — NEVER by pooling voxels across
+    subjects.
+    """
+    y0, y1, x0, x1, z0, z1 = roi
+    r = real_vol[int(y0*H):int(y1*H), int(x0*W):int(x1*W), int(z0*D):int(z1*D)]
+    g = gen_vol[ int(y0*H):int(y1*H), int(x0*W):int(x1*W), int(z0*D):int(z1*D)]
+
+    diff  = g - r
+    mse   = float(np.mean(diff ** 2))
+    mae   = float(np.mean(np.abs(diff)))
+    nrmse = float(np.sqrt(mse) / (r.max() - r.min() + 1e-8))
+
+    r_flat = r.ravel()
+    g_flat = g.ravel()
+
+    if r_flat.std() < 1e-8 or g_flat.std() < 1e-8:
+        pearson = float("nan")
+    else:
+        val, _ = pearsonr(r_flat, g_flat)
+        pearson = float(val)
+
+    ssim_score = _safe_ssim(r, g)
+
+    return {"pearson": pearson, "nrmse": nrmse, "ssim": ssim_score,
+            "mse": mse, "mae": mae}
+
+
+def compute_metrics(real, gen):
+    """Return dict of all 5 standard metrics for a pair of numpy volumes."""
+    diff  = gen - real
+    mse   = float(np.mean(diff ** 2))
+    mae   = float(np.mean(np.abs(diff)))
+    nrmse = float(np.sqrt(mse) / (real.max() - real.min() + 1e-8))
+    ssim_score = float(ssim(real, gen, data_range=1.0))
+    r, _  = pearsonr(real.ravel(), gen.ravel())
+    return {"pearson": float(r), "nrmse": nrmse, "ssim": ssim_score, "mse": mse, "mae": mae}
+
+
+def plot_loss_curves(ae_losses, diff_losses, save_path=None):
+    if save_path is None:
+        save_path = f"{FIGURES_DIR}/loss_curves.png"
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    axes[0].plot(ae_losses)
+    axes[0].set_title(f"AE Loss (100 epochs, final={ae_losses[-1]:.4f})")
+    axes[0].set_xlabel("Epoch")
+    axes[1].plot(diff_losses)
+    axes[1].set_title(f"Diffusion Loss (600 epochs, final={diff_losses[-1]:.4f})")
+    axes[1].set_xlabel("Epoch")
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path, dpi=150)
+    plt.show()
+    print(f"Epoch 1 loss:   {diff_losses[0]:.4f}")
+    if len(diff_losses) > 99:
+        print(f"Epoch 100 loss: {diff_losses[99]:.4f}")
+    print(f"Final loss:     {diff_losses[-1]:.4f}")
+
+
+def plot_ae_reconstruction(ae, test_ds, device=DEVICE, save_path=None):
+    if save_path is None:
+        save_path = f"{FIGURES_DIR}/ae_recon.png"
+    ae.eval()
+    with torch.no_grad():
+        pet, mri, _ = test_ds[0]
+        recon, _, _ = ae(pet.unsqueeze(0).to(device))
+
+    fig, axes = plt.subplots(1, 2, figsize=(8, 4))
+    mid = 48
+    axes[0].imshow(pet[0, :, :, mid].numpy(), cmap="hot")
+    axes[0].set_title("Real PET")
+    axes[1].imshow(recon[0, 0, :, :, mid].cpu().numpy(), cmap="hot")
+    axes[1].set_title("AE Reconstruction")
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path, dpi=150)
+    plt.show()
+
+
+def compare_generated_vs_real(real_vols, gen_vols, pearsons, nrmses, ssims, mses, maes,
+                               mode, save_path=None):
+    """Best / median / worst subject by SSIM + population mean real PET."""
+    if save_path is None:
+        save_path = f"{FIGURES_DIR}/taugennet_comparison.png"
+
+    ssim_arr   = np.array(ssims)
+    best_idx   = int(np.argmax(ssim_arr))
+    worst_idx  = int(np.argmin(ssim_arr))
+    median_idx = int(np.argsort(ssim_arr)[len(ssim_arr) // 2])
+
+    real_arr  = np.stack(real_vols)
+    gen_arr   = np.stack(gen_vols)
+    mean_real = real_arr.mean(axis=0)
+    mean_gen  = gen_arr.mean(axis=0)
+    mean_diff = np.abs(real_arr - gen_arr).mean(axis=0)
+
+    def _metric_str(i):
+        return (f"Pearson={pearsons[i]:.3f}  NRMSE={nrmses[i]:.3f}  SSIM={ssims[i]:.3f}"
+                f"\nMSE={mses[i]:.4f}  MAE={maes[i]:.4f}")
+
+    rows = [
+        (real_vols[best_idx],   gen_vols[best_idx],   "Best",   _metric_str(best_idx)),
+        (real_vols[median_idx], gen_vols[median_idx], "Median", _metric_str(median_idx)),
+        (real_vols[worst_idx],  gen_vols[worst_idx],  "Worst",  _metric_str(worst_idx)),
+        (mean_real,             mean_gen,             "Mean (all subjects)", None),
+    ]
+
+    fig, axes = plt.subplots(4, 3, figsize=(12, 14))
+    col_titles = ["Real PET", "Generated PET", "Abs Difference"]
+
+    for row_idx, (real, gen, row_label, metrics_str) in enumerate(rows):
+        diff = mean_diff if metrics_str is None else np.abs(real - gen)
+        mid  = real.shape[2] // 2   # axial midslice
+
+        for col_idx, (slc, cmap, vmin, vmax) in enumerate([
+            (real[:, :, mid], "hot",   0, 1),
+            (gen[:, :, mid],  "hot",   0, 1),
+            (diff[:, :, mid], "magma", 0, max(float(diff[:, :, mid].max()), 1e-6)),
+        ]):
+            ax = axes[row_idx, col_idx]
+            ax.imshow(slc, cmap=cmap, vmin=vmin, vmax=vmax)
+            if row_idx == 0:
+                ax.set_title(col_titles[col_idx], fontsize=11, fontweight="bold")
+            if col_idx == 0:
+                ax.set_ylabel(row_label, fontsize=10, fontweight="bold")
+            if col_idx == 1 and metrics_str is not None:
+                ax.set_xlabel(metrics_str, fontsize=7.5, ha="center")
+            ax.axis("off")
+
+    plt.suptitle(
+        f"Real vs Generated Tau PET — {mode}  |  "
+        f"mean SSIM={np.mean(ssims):.3f} ± {np.std(ssims):.3f}  "
+        f"mean MSE={np.mean(mses):.4f}  mean Pearson={np.mean(pearsons):.3f}"
+        f"  [per-subject avg, voxel-level]",
+        fontsize=11, fontweight="bold")
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Comparison figure saved  -> {save_path}")
+
+
+def run_steps_comparison(ae, unet, schedule, encode_cond, latent_std, test_ds,
+                         device=DEVICE, save_path=None):
+    if save_path is None:
+        save_path = f"{FIGURES_DIR}/steps_comparison.png"
+    ae.eval(); unet.eval()
+    pet, mri, atrophy = test_ds[0]
+
+    results = {}
+    for n_steps in [1, 5, 10, 50]:
+        gen = synthesize_tau_pet(mri.unsqueeze(0), atrophy, ae, unet, schedule,
+                                 encode_cond, latent_std, device=device, n_steps=n_steps)
+        results[n_steps] = gen.squeeze().numpy()
+
+    fig, axes = plt.subplots(1, 5, figsize=(15, 3))
+    mid = 48
+    axes[0].imshow(pet[0, :, :, mid].numpy(), cmap="hot")
+    axes[0].set_title("Real PET")
+    for idx, n_steps in enumerate([1, 5, 10, 50]):
+        axes[idx+1].imshow(results[n_steps][:, :, mid], cmap="hot")
+        axes[idx+1].set_title(f"{n_steps} steps")
+    for ax in axes: ax.axis("off")
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path, dpi=150)
+    plt.show()
+
+
+def run_mri_ablation_visual(ae, unet, schedule, encode_cond, latent_std, test_ds,
+                             device=DEVICE, save_path=None):
+    if save_path is None:
+        save_path = f"{FIGURES_DIR}/mri_ablation.png"
+    """Generate with real MRI vs zeroed MRI to visualise structural guidance."""
+    pet, mri, atrophy = test_ds[0]
+
+    gen_normal = synthesize_tau_pet(mri.unsqueeze(0), atrophy, ae, unet, schedule,
+                                    encode_cond, latent_std, device=device,
+                                    n_steps=500, sampler='ddpm').squeeze().numpy()
+
+    mri_zero   = torch.zeros_like(mri)
+    gen_no_mri = synthesize_no_mri(mri_zero.unsqueeze(0), atrophy, ae, unet, schedule,
+                                   encode_cond, latent_std, device=device,
+                                   n_steps=500).squeeze().numpy()
+
+    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+    mid = 48
+    axes[0].imshow(pet[0, :, :, mid].numpy(), cmap="hot")
+    axes[0].set_title("Real PET")
+    axes[1].imshow(gen_normal[:, :, mid], cmap="hot")
+    axes[1].set_title("Generated (real MRI)")
+    axes[2].imshow(gen_no_mri[:, :, mid], cmap="hot")
+    axes[2].set_title("Generated (zero MRI)")
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path, dpi=150)
+    plt.show()
+
+    diff = np.mean(np.abs(gen_normal - gen_no_mri))
+    print(f"Mean difference with/without MRI: {diff:.4f}")
+
+
+def run_multi_subject_metrics(ae, unet, schedule, encode_cond, latent_std, test_ds,
+                               device=DEVICE, n_steps=500):
+    """Compute per-subject metrics over all test subjects; also returns volumes for figures.
+
+    Returns two gen volume lists:
+      gen_vols     – brain-masked (real > 0); used for whole-brain MSE/SSIM/Pearson
+                     and all figures. The mask suppresses background model leakage.
+      gen_vols_raw – unmasked model output; used only for SUVR unnormalization
+                     (eq. 18) where the paper takes a plain regional-mean SUVR
+                     with no brain-support mask applied.
+    """
+    pearsons, nrmses, ssims, mses, maes = [], [], [], [], []
+    real_vols, gen_vols, gen_vols_raw = [], [], []
+    for i in range(len(test_ds)):
+        pet, mri, atrophy = test_ds[i]
+        real    = pet.squeeze().numpy()
+        gen_raw = synthesize_tau_pet(mri.unsqueeze(0), atrophy, ae, unet, schedule,
+                                     encode_cond, latent_std, device=device,
+                                     n_steps=n_steps, sampler='ddpm').squeeze().numpy()
+        gen = gen_raw * (real > 0)   # masked copy for whole-brain metrics / figures
+        real_vols.append(real)
+        gen_vols_raw.append(gen_raw)
+        gen_vols.append(gen)
+        m = compute_metrics(real, gen)
+        pearsons.append(m["pearson"])
+        nrmses.append(m["nrmse"])
+        ssims.append(m["ssim"])
+        mses.append(m["mse"])
+        maes.append(m["mae"])
+
+    print(f"Mean Pearson: {np.mean(pearsons):.4f} ± {np.std(pearsons):.4f}")
+    print(f"Mean NRMSE:   {np.mean(nrmses):.4f} ± {np.std(nrmses):.4f}")
+    print(f"Mean SSIM:    {np.mean(ssims):.4f} ± {np.std(ssims):.4f}")
+    print(f"Mean MSE:     {np.mean(mses):.4f} ± {np.std(mses):.4f}")
+    print(f"Mean MAE:     {np.mean(maes):.4f} ± {np.std(maes):.4f}")
+    return pearsons, nrmses, ssims, mses, maes, real_vols, gen_vols, gen_vols_raw
+
+
+def plot_population_comparison(real_vols, gen_vols, mode, save_path):
+    """Mean real / mean generated / mean abs error across all test subjects, 3 views."""
+    real_arr  = np.stack(real_vols)                          # (N, H, W, D)
+    gen_arr   = np.stack(gen_vols)
+    mean_real = real_arr.mean(axis=0)
+    mean_gen  = gen_arr.mean(axis=0)
+    mean_err  = np.abs(real_arr - gen_arr).mean(axis=0)
+
+    views = {"Axial": 2, "Sagittal": 0, "Coronal": 1}
+    fig, axes = plt.subplots(len(views), 3, figsize=(12, 3 * len(views)))
+
+    for row_idx, (view_name, axis_dim) in enumerate(views.items()):
+        mid = mean_real.shape[axis_dim] // 2
+        r_slc = np.take(mean_real, mid, axis=axis_dim)
+        g_slc = np.take(mean_gen,  mid, axis=axis_dim)
+        e_slc = np.take(mean_err,  mid, axis=axis_dim)
+
+        for col_idx, (slc, title, cmap, vmin, vmax) in enumerate([
+            (r_slc, "Mean Real PET",   "hot",   0, 1),
+            (g_slc, "Mean Generated",  "hot",   0, 1),
+            (e_slc, "Mean Abs Error",  "magma", 0, max(float(e_slc.max()), 1e-6)),
+        ]):
+            ax = axes[row_idx, col_idx]
+            ax.imshow(slc, cmap=cmap, vmin=vmin, vmax=vmax)
+            if row_idx == 0:
+                ax.set_title(title, fontsize=11, fontweight="bold")
+            if col_idx == 0:
+                ax.set_ylabel(view_name, fontsize=10)
+            ax.axis("off")
+
+    plt.suptitle(f"Population Mean — {mode} (n={len(real_vols)} subjects)",
+                 fontsize=12, fontweight="bold")
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Population comparison saved -> {save_path}")
+
+
+def plot_subject_comparison(real_vols, gen_vols, nrmses, mode, save_path):
+    """Best / median / worst subject by NRMSE, axial midslice, 3 columns."""
+    nrmse_arr  = np.array(nrmses)
+    best_idx   = int(np.argmin(nrmse_arr))
+    worst_idx  = int(np.argmax(nrmse_arr))
+    median_idx = int(np.argsort(nrmse_arr)[len(nrmse_arr) // 2])
+
+    subjects = [
+        (best_idx,   f"Best   (NRMSE={nrmses[best_idx]:.3f})"),
+        (median_idx, f"Median (NRMSE={nrmses[median_idx]:.3f})"),
+        (worst_idx,  f"Worst  (NRMSE={nrmses[worst_idx]:.3f})"),
+    ]
+
+    fig, axes = plt.subplots(3, 3, figsize=(12, 9))
+
+    for row_idx, (idx, row_label) in enumerate(subjects):
+        real = real_vols[idx]
+        gen  = gen_vols[idx]
+        diff = np.abs(real - gen)
+        mid  = real.shape[2] // 2   # axial midslice
+
+        for col_idx, (slc, title, cmap, vmin, vmax) in enumerate([
+            (real[:, :, mid], "Real PET",       "hot",   0, 1),
+            (gen[:, :, mid],  "Generated PET",  "hot",   0, 1),
+            (diff[:, :, mid], "Abs Difference", "magma", 0, max(float(diff.max()), 1e-6)),
+        ]):
+            ax = axes[row_idx, col_idx]
+            ax.imshow(slc, cmap=cmap, vmin=vmin, vmax=vmax)
+            if row_idx == 0:
+                ax.set_title(title, fontsize=11, fontweight="bold")
+            if col_idx == 0:
+                ax.set_ylabel(row_label, fontsize=9)
+            ax.axis("off")
+
+    plt.suptitle(f"Best / Median / Worst Subject — {mode}", fontsize=12, fontweight="bold")
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Subject comparison saved  -> {save_path}")
+
+
+def run_roi_metrics_eval(real_vols, gen_vols):
+    """All 5 metrics (Pearson, NRMSE, SSIM, MSE, MAE) for each of the 6 ROIs.
+
+    AGGREGATION: every metric is computed PER SUBJECT at the voxel level
+    within the ROI, and the table reports the mean of those per-subject
+    values across subjects. Voxels are NEVER pooled across subjects.
+
+    Reuses the volumes already generated by run_multi_subject_metrics, so the
+    ROI numbers come from exactly the same samples as the whole-brain metrics.
+
+    Returns:
+        tables      – dict of metric -> DataFrame (1 row "All subjects", 6 ROI cols)
+        roi_metrics – dict of ROI -> metric -> list of per-subject values
+                      (raw values, useful for boxplots / stats)
+    """
+    roi_metrics = {r: {k: [] for k in ROI_METRIC_KEYS} for r in ROI_DEFS}
+
+    print("Computing ROI metrics (per-subject, then averaged — never pooled)...")
+    for real, gen in tqdm(list(zip(real_vols, gen_vols))):
+        for rname, roi in ROI_DEFS.items():
+            m = roi_metrics_per_subject(real, gen, roi)
+            for k in ROI_METRIC_KEYS:
+                roi_metrics[rname][k].append(m[k])
+
+    tables = {k: pd.DataFrame(index=["All subjects"], columns=list(ROI_DEFS.keys()), dtype=float)
+              for k in ROI_METRIC_KEYS}
+
+    for rname in ROI_DEFS:
+        for k in ROI_METRIC_KEYS:
+            vals = [v for v in roi_metrics[rname][k] if not np.isnan(v)]
+            tables[k].loc["All subjects", rname] = round(float(np.mean(vals)), 6) if vals else float("nan")
+
+    for k in ROI_METRIC_KEYS:
+        print(f"\nRegion-wise {k.upper()} [per-subject avg, voxel-level]:")
+        print(tables[k].to_string())
+    return tables, roi_metrics
+
+
+def plot_roi_metrics_boxplot(roi_metrics, mode, save_path):
+    """Boxplots of all 5 per-subject ROI metrics: one panel per metric, one box per ROI.
+
+    Each box shows the distribution of PER-SUBJECT values for that ROI
+    (computed at the voxel level within each subject — never pooled).
+    """
+    rois = list(ROI_DEFS.keys())
+    fig, axes = plt.subplots(len(ROI_METRIC_KEYS), 1,
+                             figsize=(12, 3.2 * len(ROI_METRIC_KEYS)))
+    fig.suptitle(f"Per-subject ROI metrics — {mode} mode  [per-subject avg, voxel-level]",
+                 fontsize=13, fontweight="bold")
+
+    rng = np.random.default_rng(0)
+    for ax, metric in zip(axes, ROI_METRIC_KEYS):
+        data = []
+        for rname in rois:
+            vals = np.array([v for v in roi_metrics[rname][metric] if not np.isnan(v)])
+            data.append(vals)
+
+        ax.boxplot(data, patch_artist=True, widths=0.5,
+                   boxprops=dict(facecolor="#aec6e8", color="#2c5f8a"),
+                   medianprops=dict(color="#d62728", linewidth=2),
+                   whiskerprops=dict(color="#2c5f8a"),
+                   capprops=dict(color="#2c5f8a"),
+                   flierprops=dict(marker="o", markersize=4, color="#999999"))
+
+        # jittered individual subjects + mean±std labels per ROI
+        labels = []
+        for i, (rname, vals) in enumerate(zip(rois, data)):
+            jitter = rng.uniform(-0.12, 0.12, size=len(vals))
+            ax.scatter(i + 1 + jitter, vals, alpha=0.55, s=14, color="#1f77b4", zorder=3)
+            if len(vals):
+                labels.append(f"{rname}\n{np.mean(vals):.3f} ± {np.std(vals):.3f}")
+            else:
+                labels.append(f"{rname}\nNaN")
+
+        ax.set_xticks(range(1, len(rois) + 1))
+        ax.set_xticklabels(labels, fontsize=8)
+        ax.set_ylabel(metric.upper(), fontsize=10, fontweight="bold")
+
+    plt.tight_layout(rect=[0, 0, 1, 0.98])
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"ROI metrics boxplot saved -> {save_path}")
+
+
+def run_ablation_study(ae, unet, schedule, encode_cond, latent_std, test_loader,
+                       device=DEVICE, n_steps=20):
+    """MRI+Atrophy vs Atrophy-only ablation.
+
+    All 5 metrics are computed per-subject at the voxel level within the ROI,
+    and then averaged across subjects. Never pooled across subjects.
+    """
+    conds = ["MRI+Atrophy", "Atrophy-only"]
+    roi_metrics = {c: {r: {k: [] for k in ROI_METRIC_KEYS} for r in ROI_DEFS} for c in conds}
+
+    print("Running ablation study...")
+    for pet, mri, ptau in tqdm(test_loader):
+        for i in range(pet.shape[0]):
+            mri_i     = mri[i:i+1]
+            pet_np    = pet[i].squeeze().numpy()
+            gen_full  = synthesize_tau_pet(mri_i, ptau[i], ae, unet, schedule,
+                                           encode_cond, latent_std, device=device,
+                                           n_steps=n_steps).squeeze().numpy()
+            gen_ablat = synthesize_no_mri(mri_i, ptau[i], ae, unet, schedule,
+                                          encode_cond, latent_std, device=device,
+                                          n_steps=n_steps).squeeze().numpy()
+            # Mask both generated volumes to the real's brain support (see
+            # run_multi_subject_metrics) so the background leak doesn't bias the ROI metrics.
+            brain     = pet_np > 0
+            gen_full  = gen_full  * brain
+            gen_ablat = gen_ablat * brain
+
+            for rname, roi in ROI_DEFS.items():
+                m_full  = roi_metrics_per_subject(pet_np, gen_full, roi)
+                m_ablat = roi_metrics_per_subject(pet_np, gen_ablat, roi)
+                for k in ROI_METRIC_KEYS:
+                    roi_metrics["MRI+Atrophy"][rname][k].append(m_full[k])
+                    roi_metrics["Atrophy-only"][rname][k].append(m_ablat[k])
+
+    tables = {k: pd.DataFrame(index=conds, columns=list(ROI_DEFS.keys()), dtype=float)
+              for k in ROI_METRIC_KEYS}
+
+    for cond in conds:
+        for rname in ROI_DEFS:
+            for k in ROI_METRIC_KEYS:
+                vals = [v for v in roi_metrics[cond][rname][k] if not np.isnan(v)]
+                tables[k].loc[cond, rname] = round(float(np.mean(vals)), 6) if vals else float("nan")
+
+    for k in ROI_METRIC_KEYS:
+        print(f"\nAblation {k.upper()} [per-subject avg, voxel-level] – cf. Table I:")
+        print(tables[k].to_string())
+    return tables
+
+
+def plot_metrics_boxplot(pearsons, nrmses, ssims, mses, maes, mode, save_path):
+    """Boxplot of all 5 per-subject metrics with individual points and summary stats."""
+    metrics = {
+        "Pearson": pearsons,
+        "NRMSE":   nrmses,
+        "SSIM":    ssims,
+        "MSE":     mses,
+        "MAE":     maes,
+    }
+    fig, axes = plt.subplots(1, 5, figsize=(16, 5))
+    fig.suptitle(f"Per-subject metrics — {mode} mode  (n={len(pearsons)})",
+                 fontsize=13, fontweight="bold")
+
+    rng = np.random.default_rng(0)
+    for ax, (name, vals) in zip(axes, metrics.items()):
+        vals_arr = np.array(vals)
+        bp = ax.boxplot(vals_arr, patch_artist=True, widths=0.5,
+                        boxprops=dict(facecolor="#aec6e8", color="#2c5f8a"),
+                        medianprops=dict(color="#d62728", linewidth=2),
+                        whiskerprops=dict(color="#2c5f8a"),
+                        capprops=dict(color="#2c5f8a"),
+                        flierprops=dict(marker="o", markersize=4, color="#999999"))
+
+        # jittered individual points
+        jitter = rng.uniform(-0.12, 0.12, size=len(vals_arr))
+        ax.scatter(1 + jitter, vals_arr, alpha=0.55, s=18, color="#1f77b4", zorder=3)
+
+        median = float(np.median(vals_arr))
+        mean   = float(np.mean(vals_arr))
+        std    = float(np.std(vals_arr))
+        ax.axhline(mean, color="#ff7f0e", linestyle="--", linewidth=1.2, label=f"mean")
+
+        # annotate median and mean ± std below the plot
+        ax.set_title(name, fontsize=11, fontweight="bold")
+        ax.set_xticks([])
+        ax.set_xlabel(
+            f"median {median:.3f}\nmean {mean:.3f} ± {std:.3f}",
+            fontsize=8.5
+        )
+
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+
+
+def plot_multi_subject_ssim(ssims, mode, save_path):
+    """Bar chart of per-subject SSIM across the test set."""
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.bar(range(len(ssims)), ssims, color="steelblue")
+    ax.axhline(np.mean(ssims), color="red", linestyle="--",
+               label=f"Mean = {np.mean(ssims):.3f} ± {np.std(ssims):.3f}")
+    ax.set_xlabel("Test subject index")
+    ax.set_ylabel("SSIM")
+    ax.set_title(f"Per-subject SSIM — {mode} mode")
+    ax.set_ylim(0, 1)
+    ax.legend()
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+
+
+def plot_roi_heatmap(mse_table, mode, save_path):
+    """Heatmap of region-wise MSE table."""
+    fig, ax = plt.subplots(figsize=(11, 2))
+    data = mse_table.values.astype(float)
+    im = ax.imshow(data, cmap="YlOrRd", aspect="auto")
+    ax.set_xticks(range(len(mse_table.columns)))
+    ax.set_xticklabels(mse_table.columns, rotation=30, ha="right", fontsize=9)
+    ax.set_yticks(range(len(mse_table.index)))
+    ax.set_yticklabels(mse_table.index, fontsize=9)
+    for i in range(data.shape[0]):
+        for j in range(data.shape[1]):
+            ax.text(j, i, f"{data[i,j]:.4f}", ha="center", va="center", fontsize=7)
+    plt.colorbar(im, ax=ax, label="MSE")
+    ax.set_title(f"Region-wise MSE [per-subject avg, voxel-level] — {mode} mode")
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+
+
+def plot_ablation_roi_comparison(ablation_tables, mode, save_path):
+    """Grouped bar chart: MRI+Atrophy vs Atrophy-only per ROI for MSE and Pearson."""
+    rois = list(ROI_DEFS.keys())
+    x    = np.arange(len(rois))
+    w    = 0.35
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    for ax, metric, ylabel, title in [
+        (axes[0], "mse",     "MSE",     "Region-wise MSE\n[per-subject avg, voxel-level]"),
+        (axes[1], "pearson", "Pearson", "Region-wise Pearson\n[per-subject avg, voxel-level]"),
+    ]:
+        tbl = ablation_tables[metric]
+        mri_vals   = [float(tbl.loc["MRI+Atrophy",   r]) for r in rois]
+        ablat_vals = [float(tbl.loc["Atrophy-only",   r]) for r in rois]
+
+        ax.bar(x - w/2, mri_vals,   w, label="MRI+Atrophy",   color="#4c72b0")
+        ax.bar(x + w/2, ablat_vals, w, label="Atrophy-only",  color="#dd8452")
+        ax.set_xticks(x)
+        ax.set_xticklabels(rois, rotation=25, ha="right", fontsize=9)
+        ax.set_ylabel(ylabel, fontsize=10)
+        ax.set_title(title, fontsize=11, fontweight="bold")
+        ax.legend(fontsize=9)
+
+    plt.suptitle(f"MRI Ablation — Per-ROI Metrics ({mode})", fontsize=13, fontweight="bold")
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Ablation ROI comparison saved -> {save_path}")
+
+
+# ── paper eq. 18: plasma-interval × region NRMSE (regional-mean SUVR) ─────────
+#
+# This is a DIFFERENT quantity from run_roi_metrics_eval above. Per the paper:
+#   - each ROI is collapsed to its MEAN SUVR (one scalar per subject per region),
+#   - the RMS is taken ACROSS SUBJECTS within a plasma p-tau217 interval g,
+#   - normalized by the group-average real regional mean R̄_real_{g,k},
+#   - yielding a G × K (plasma bin × region) matrix.
+# It is computed in SUVR space (required — it's a cross-subject comparison, so
+# per-subject [0,1] normalization would put subjects on incompatible scales).
+
+def roi_mean_suvr(vol, roi, mask_zeros=True):
+    """Mean SUVR within an ROI bounding box → a single scalar.
+
+    mask_zeros=True excludes masked-out (==0) background voxels so the mean is
+    over brain tissue only, matching the paper's regional-mean definition.
+    """
+    y0, y1, x0, x1, z0, z1 = roi
+    crop = vol[int(y0*H):int(y1*H), int(x0*W):int(x1*W), int(z0*D):int(z1*D)]
+    if mask_zeros:
+        nz = crop[crop != 0]
+        return float(nz.mean()) if nz.size else 0.0
+    return float(crop.mean())
+
+
+def _plasma_value(cond):
+    """Extract a single scalar plasma p-tau217 value from a subject's conditioning.
+
+    ptau217 mode: cond is a (1,) tensor — return it directly.
+    combined mode: cond is an (87,) tensor = [atrophy z-scores (86) | ptau217 (1)].
+                   The plasma value is always the last element.
+    """
+    t = cond
+    if hasattr(t, "detach"):
+        t = t.detach().cpu().numpy()
+    t = np.asarray(t, dtype=np.float64).ravel()
+    if t.size == 1:
+        return float(t[0])
+    return float(t[-1])   # combined mode: ptau217 is the last element
+
+
+def run_roi_nrmse_plasma(real_suvr_vols, gen_suvr_vols, plasma_values,
+                         plasma_bins=PLASMA_BINS, bin_labels=BIN_LABELS,
+                         mask_zeros=False):
+    """Paper eq. 18 — NRMSE over (plasma interval g, region k) on regional-mean SUVR.
+
+        NRMSE_{g,k} = sqrt( (1/N_g) Σ_{i∈g} (Rreal_{i,k} − Rgen_{i,k})² ) / R̄real_{g,k}
+
+    where R_{i,k} is subject i's MEAN SUVR in region k, the sum runs over subjects
+    in plasma bin g, and R̄real_{g,k} is the bin-average real regional mean. The RMS
+    is across SUBJECTS, never voxel-pooled and never a per-subject voxel RMS.
+
+    Returns a (G × K) DataFrame: rows = plasma bin labels, columns = ROI names.
+    """
+    rois = list(ROI_DEFS.keys())
+    n    = len(real_suvr_vols)
+
+    # Per-subject regional mean SUVR (rows = subjects, cols = ROIs).
+    Rreal = np.zeros((n, len(rois)))
+    Rgen  = np.zeros((n, len(rois)))
+    for i in range(n):
+        for k, rname in enumerate(rois):
+            Rreal[i, k] = roi_mean_suvr(real_suvr_vols[i], ROI_DEFS[rname], mask_zeros)
+            Rgen[i, k]  = roi_mean_suvr(gen_suvr_vols[i],  ROI_DEFS[rname], mask_zeros)
+
+    plasma = np.asarray(plasma_values, dtype=np.float64)
+    table  = pd.DataFrame(index=bin_labels, columns=rois, dtype=float)
+    counts = {}
+
+    for (lo, hi), label in zip(plasma_bins, bin_labels):
+        in_bin = (plasma >= lo) & (plasma < hi)
+        counts[label] = int(in_bin.sum())
+        if in_bin.sum() == 0:
+            table.loc[label, :] = float("nan")
+            continue
+        for k, rname in enumerate(rois):
+            r = Rreal[in_bin, k]
+            g = Rgen[in_bin, k]
+            denom = float(r.mean())
+            rmse  = float(np.sqrt(np.mean((r - g) ** 2)))
+            table.loc[label, rname] = round(rmse / denom, 6) if abs(denom) > 1e-8 else float("nan")
+
+    print("\nPlasma × Region NRMSE [eq. 18, SUVR, regional-mean, across-subject]:")
+    print("Subjects per plasma bin:", counts)
+    print(table.to_string())
+    return table
+
+
+def plot_nrmse_plasma_matrix(table, mode, save_path):
+    """Heatmap of the plasma-interval × region NRMSE matrix (eq. 18)."""
+    data = table.values.astype(float)
+    fig, ax = plt.subplots(figsize=(11, 0.7 * len(table.index) + 1.5))
+    im = ax.imshow(data, cmap="YlOrRd", aspect="auto")
+    ax.set_xticks(range(len(table.columns)))
+    ax.set_xticklabels(table.columns, rotation=30, ha="right", fontsize=9)
+    ax.set_yticks(range(len(table.index)))
+    ax.set_yticklabels(table.index, fontsize=9)
+    for i in range(data.shape[0]):
+        for j in range(data.shape[1]):
+            v = data[i, j]
+            ax.text(j, i, "—" if np.isnan(v) else f"{v:.3f}",
+                    ha="center", va="center", fontsize=7)
+    plt.colorbar(im, ax=ax, label="NRMSE")
+    ax.set_ylabel("Plasma p-tau217 interval")
+    ax.set_title(f"Plasma × Region NRMSE [eq. 18, SUVR, regional-mean] — {mode} mode")
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Plasma-stratified NRMSE matrix saved -> {save_path}")
+
+
+# ── checkpoint-dir → figures subdirectory mapping ─────────────────────────────
+_DIR_TO_SUBPATH = {
+    "atrophy":    os.path.join("atrophy",  "72split"),
+    "ptau217":    os.path.join("ptau217",  "72split"),
+    "atrophy_v2": os.path.join("atrophy",  "80split"),
+    "ptau217_v2": os.path.join("ptau217",  "80split"),
+    "combined":   "atrophy_ptau217",
+}
+
+
+if __name__ == "__main__":
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument("--mode", choices=["atrophy", "ptau217", "combined"], default="atrophy")
+    p.add_argument("--checkpoint-dir", type=str, default=None,
+                   help="Override default checkpoint directory.")
+    p.add_argument("--figures-dir", type=str, default=None,
+                   help="Override figures subdirectory (relative to results/figures/). "
+                        "Auto-detected from --checkpoint-dir if not set.")
+    p.add_argument("--use-mask", action="store_true", default=False,
+                   help="Apply gray-matter brain mask (T1_seg label==2) to MRI and PET volumes")
+    p.add_argument("--arch", choices=["silu", "relu"], default="silu",
+                   help="Model architecture variant: 'silu' (default) or 'relu'")
+    args = p.parse_args()
+
+    COND_MODE = args.mode
+
+    # ── checkpoint path ────────────────────────────────────────────────────────
+    if args.checkpoint_dir:
+        CKPT_PATH = os.path.join(args.checkpoint_dir, f"diff_{COND_MODE}.pt")
+    else:
+        CKPT_PATH = f"results/checkpoints/{COND_MODE}/diff_{COND_MODE}.pt"
+
+    # ── figures output directory ───────────────────────────────────────────────
+    if args.figures_dir:
+        fig_subpath = args.figures_dir
+    elif args.checkpoint_dir:
+        key = os.path.basename(args.checkpoint_dir.rstrip("/"))
+        fig_subpath = _DIR_TO_SUBPATH.get(key, key)
+    else:
+        fig_subpath = _DIR_TO_SUBPATH.get(COND_MODE, COND_MODE)
+
+    FIG_DIR = os.path.join(FIGURES_DIR, fig_subpath)
+    os.makedirs(FIG_DIR, exist_ok=True)
+    print(f"Figures → {FIG_DIR}")
+
+    # ── dataset ───────────────────────────────────────────────────────────────
+    if args.arch == "relu":
+        from src import dataset_v2_relu as _dataset_v2_relu
+        from src import dataset_combined_relu as _dataset_combined_relu
+        if args.mode == "combined":
+            train_ds, val_ds, test_ds, train_loader, val_loader, test_loader = \
+                _dataset_combined_relu.build_dataloaders(mode=COND_MODE, use_dk_mask=args.use_mask)
+        else:
+            train_ds, val_ds, test_ds, train_loader, val_loader, test_loader = \
+                _dataset_v2_relu.build_dataloaders(mode=COND_MODE, use_dk_mask=args.use_mask)
+    else:
+        if args.mode == "combined":
+            train_ds, val_ds, test_ds, train_loader, val_loader, test_loader = \
+                _dataset_combined.build_dataloaders(mode=COND_MODE, use_dk_mask=args.use_mask)
+        else:
+            train_ds, val_ds, test_ds, train_loader, val_loader, test_loader = \
+                _dataset_final.build_dataloaders(mode=COND_MODE, use_dk_mask=args.use_mask)
+
+    ae, unet, conditioner, latent_std, diff_losses = load_models(CKPT_PATH, COND_MODE, arch=args.arch)
+    encode_cond = conditioner.encode
+    schedule    = DiffusionSchedule()
+    print(f"latent_std per channel: {latent_std.squeeze().tolist()}")
+
+    # Loss curve
+    print(f"Final diffusion loss: {diff_losses[-1]:.6f}")
+    plt.figure(figsize=(7, 3))
+    plt.plot(diff_losses); plt.xlabel("Epoch"); plt.ylabel("MSE Loss")
+    plt.title(f"Diffusion Loss — {COND_MODE} mode"); plt.tight_layout()
+    plt.savefig(f"{FIG_DIR}/diff_loss_{COND_MODE}_2.png", dpi=150)
+    plt.close()
+
+    # AE reconstruction quality
+    plot_ae_reconstruction(ae, test_ds,
+                           save_path=f"{FIG_DIR}/ae_recon_2.png")
+
+    # Denoising steps comparison
+    run_steps_comparison(ae, unet, schedule, encode_cond, latent_std, test_ds,
+                         save_path=f"{FIG_DIR}/steps_{COND_MODE}_2.png")
+
+    # MRI ablation visualisation
+    run_mri_ablation_visual(ae, unet, schedule, encode_cond, latent_std, test_ds,
+                            save_path=f"{FIG_DIR}/mri_ablation_{COND_MODE}_2.png")
+
+    # Multi-subject metrics (computes all vols once; reused by several plots below)
+    pearsons, nrmses, ssims, mses, maes, real_vols, gen_vols, gen_vols_raw = \
+        run_multi_subject_metrics(ae, unet, schedule, encode_cond, latent_std, test_ds)
+    plot_multi_subject_ssim(ssims, COND_MODE,
+                            save_path=f"{FIG_DIR}/multi_subject_ssim_{COND_MODE}_2.png")
+    plot_metrics_boxplot(pearsons, nrmses, ssims, mses, maes, COND_MODE,
+                         save_path=f"{FIG_DIR}/metrics_boxplot_{COND_MODE}_2.png")
+    plot_population_comparison(real_vols, gen_vols, COND_MODE,
+                               save_path=f"{FIG_DIR}/population_comparison_{COND_MODE}_2.png")
+    plot_subject_comparison(real_vols, gen_vols, nrmses, COND_MODE,
+                            save_path=f"{FIG_DIR}/subject_comparison_{COND_MODE}_2.png")
+
+    # Best/median/worst + mean real PET comparison (uses pre-computed vols)
+    compare_generated_vs_real(real_vols, gen_vols, pearsons, nrmses, ssims, mses, maes,
+                              COND_MODE, save_path=f"{FIG_DIR}/comparison_{COND_MODE}_2.png")
+
+    # ROI metrics: all 5 metrics × 6 ROIs, per-subject then averaged (never pooled).
+    # Reuses the same 500-step DDPM volumes as the whole-brain metrics above.
+    roi_tables, roi_raw = run_roi_metrics_eval(real_vols, gen_vols)
+    plot_roi_heatmap(roi_tables["mse"], COND_MODE,
+                     save_path=f"{FIG_DIR}/roi_heatmap_{COND_MODE}_2.png")
+    plot_roi_metrics_boxplot(roi_raw, COND_MODE,
+                             save_path=f"{FIG_DIR}/roi_metrics_boxplot_{COND_MODE}_2.png")
+
+    # Ablation study (Table I) + per-ROI bar chart
+    ablation_tables = run_ablation_study(ae, unet, schedule, encode_cond, latent_std, test_loader)
+    plot_ablation_roi_comparison(ablation_tables, COND_MODE,
+                                 save_path=f"{FIG_DIR}/ablation_roi_{COND_MODE}_2.png")
+
+    # Paper eq. 18: plasma-interval × region NRMSE on regional-mean SUVR.
+    # Needs SUVR (unnormalize the [0,1] vols) and a per-subject plasma p-tau217 scalar.
+    # Plasma is the conditioning biomarker only in ptau217/combined modes.
+    if COND_MODE in ("ptau217", "combined"):
+        from src.dataset_final import unnormalize as _unnormalize
+        real_suvr, gen_suvr, plasma_vals = [], [], []
+        for i in range(len(test_ds)):
+            _, _, cond = test_ds[i]
+            if hasattr(test_ds, "get_pet_norms"):
+                pmin, pmax = test_ds.get_pet_norms(i)
+            else:
+                import nibabel as _nib
+                _raw = _nib.load(test_ds.pet_paths[i]).get_fdata().astype(np.float32)
+                pmin, pmax = float(_raw.min()), float(_raw.max())
+            # Use gen_vols_raw (unmasked model output) so the regional-mean SUVR
+            # matches paper eq. 18 exactly — no brain-support mask applied.
+            r_suvr = _unnormalize(real_vols[i],    pmin, pmax)
+            g_suvr = _unnormalize(gen_vols_raw[i], pmin, pmax)
+            real_suvr.append(r_suvr)
+            gen_suvr.append(g_suvr)
+            plasma_vals.append(_plasma_value(cond))
+
+        nrmse_matrix = run_roi_nrmse_plasma(real_suvr, gen_suvr, plasma_vals)
+        plot_nrmse_plasma_matrix(nrmse_matrix, COND_MODE,
+                                 save_path=f"{FIG_DIR}/nrmse_plasma_matrix_{COND_MODE}_2.png")
+    else:
+        print("\nSkipping plasma × region NRMSE (eq. 18): in atrophy mode the "
+              "conditioning is atrophy, not plasma p-tau217. Supply per-subject "
+              "plasma values via _plasma_value() to enable it for this mode.")
