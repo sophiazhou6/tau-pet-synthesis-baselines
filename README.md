@@ -38,7 +38,15 @@ Figures (hexbin, region bar charts, glass brain) come from
 This repo does **not** include ADNI data or trained checkpoints — the ADNI Data Use
 Agreement doesn't permit redistributing subject-level imaging or biomarker data. Both models
 expect a `TAUGENNET_ROOT` environment variable pointing at a local `data/raw/` populated
-per each subfolder's README.
+with your own ADNI tau-PET + MRI pull (see `taugennet/src/config.py` and
+`taugennet/src/dataset_final.py` for the exact expected file layout).
+
+## Requirements
+
+Developed against Python 3.9. Third-party deps (no `requirements.txt` yet — install via
+conda/pip as you prefer): `torch`, `nibabel`, `numpy`, `scipy`, `scikit-image`, `nilearn`,
+`matplotlib`, `pandas`, `tqdm`, `transformers` (the last only needed for the `ptau217`/
+`combined` conditioning modes, which use a frozen CLIP/BioBERT text encoder).
 
 ## Environment
 
@@ -47,6 +55,47 @@ export TAUGENNET_ROOT=/path/to/this/repo/taugennet
 export PYTHONPATH=$TAUGENNET_ROOT:${PYTHONPATH:-}
 ```
 
-See [`taugennet/CLAUDE.md`](taugennet/CLAUDE.md) for the full pipeline (training launch,
-evaluation launch, canonical metric sets) and [`baselines/tau-denseunet/README.md`](baselines/tau-denseunet/README.md)
-for the baseline's usage.
+`TAUGENNET_ROOT` is read by `src/config.py` — if it's unset, paths silently fall back to a
+stale hardcoded default and everything writes into the wrong place, so always set it first.
+
+## Quickstart — TauGenNet (diffusion model)
+
+```bash
+cd taugennet
+
+# Train (AE + diffusion, mentor split, default 64/16/20) — `--mode` is the only required flag
+python scripts/train.py --mode atrophy
+
+# Evaluate: run fresh inference from a checkpoint, cache the generations, and score them
+python scripts/evaluate_final.py --mode atrophy \
+    --checkpoint-dir results/checkpoints/<your_run> \
+    --save-generated --generated-dir results/generated/atrophy
+
+# Re-score cached generations later without a GPU / re-running inference
+python scripts/evaluate_final.py --mode atrophy --use-cached \
+    --generated-dir results/generated/atrophy
+```
+
+`--mode` selects the conditioning: `atrophy` (regional atrophy z-scores), `ptau217`
+(plasma biomarker via text encoder), or `combined`. `evaluate_final.py` writes the full
+DK86-masked metric suite (see Evaluation above) plus glass-brain figures by default. SLURM
+batch scripts for both training and evaluation are under `slurm/` if you have access to a
+SLURM cluster; see [`taugennet/CLAUDE.md`](taugennet/CLAUDE.md) for the full set of launch
+variants (grid search, ablations, CV folds) and cluster-specific notes.
+
+## Quickstart — DenseUNet baseline
+
+```bash
+cd baselines/tau-denseunet
+
+python scripts/train.py    --mode atrophy
+python scripts/generate.py --mode atrophy   # writes results/generated/atrophy/subject_*.npy
+
+# Score with TauGenNet's evaluate_final.py — same pipeline, no duplicated metric code
+cd $TAUGENNET_ROOT
+python scripts/evaluate_final.py --mode atrophy --use-cached \
+    --generated-dir <path-to>/baselines/tau-denseunet/results/generated/atrophy
+```
+
+See [`baselines/tau-denseunet/README.md`](baselines/tau-denseunet/README.md) for the full
+usage notes and what this baseline is (and isn't) porting from upstream.
