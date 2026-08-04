@@ -33,5 +33,5 @@ slurm/     SLURM batch scripts (training, evaluation, grid search, ablations)
 
 ## Usage
 
-See the root [README.md](../../README.md) Quickstart section, and
+See the root [README.md](../README.md) Quickstart section, and
 [`CLAUDE.md`](CLAUDE.md) for the full pipeline and cluster-specific notes.
