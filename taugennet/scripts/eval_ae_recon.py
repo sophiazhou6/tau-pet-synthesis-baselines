@@ -23,7 +23,7 @@ import torch
 from scipy.stats import pearsonr
 from skimage.metrics import structural_similarity as ssim
 
-from src.config import DEVICE, VOL_SHAPE, FIGURES_DIR, AE_CHECKPOINT_PATH, LATENT_CH
+from src.config import DEVICE, VOL_SHAPE, FIGURES_DIR, AE_CHECKPOINT_PATH, LATENT_CH, LATENT_SCALE
 from src.models import Autoencoder3D
 from src import dataset_final as _dataset
 
@@ -84,11 +84,15 @@ def load_ae(checkpoint_path: str, latent_ch: int = None) -> Autoencoder3D:
     # Prefer an explicit override (needed for older AE checkpoints that didn't save
     # latent_ch); else read it from the checkpoint; else fall back to the config default.
     latent_ch = latent_ch or ckpt.get("latent_ch", LATENT_CH)
-    ae = Autoencoder3D(latent_ch=latent_ch).to(DEVICE)
+    # Rebuild at the checkpoint's spatial scale + depth (grid axes); defaults reproduce the
+    # original arch for older checkpoints that didn't save these.
+    scale        = ckpt.get("ae_scale", LATENT_SCALE)
+    n_res_blocks = ckpt.get("ae_res_blocks", 1)
+    ae = Autoencoder3D(latent_ch=latent_ch, scale=scale, n_res_blocks=n_res_blocks).to(DEVICE)
     state = ckpt["ae"] if "ae" in ckpt else ckpt
     ae.load_state_dict(state)
     ae.eval()
-    print(f"AE latent_ch={latent_ch}")
+    print(f"AE latent_ch={latent_ch}  scale={scale}  res_blocks={n_res_blocks}")
     return ae
 
 

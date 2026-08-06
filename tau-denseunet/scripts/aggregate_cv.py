@@ -1,4 +1,4 @@
-#!/home/sz3962/.conda/envs/taugennet/bin/python3
+#!/usr/bin/python3.9
 """
 Post-CV aggregation — run after the 5-fold array finishes. Produces the
 mentor-facing deliverables:
@@ -32,7 +32,7 @@ sys.path.insert(0, REPO)
 from denseunet.config import GENERATED_DIR, REPO_ROOT, TAUGENNET_ROOT  # noqa: E402
 from denseunet import figs  # noqa: E402
 
-PY = "/home/sz3962/.conda/envs/taugennet/bin/python3"
+PY = "/usr/bin/python3.9"
 RECORDS_DIR = os.path.join(REPO_ROOT, "results", "records")
 FIGURES_DIR = os.path.join(REPO_ROOT, "results", "figures")
 

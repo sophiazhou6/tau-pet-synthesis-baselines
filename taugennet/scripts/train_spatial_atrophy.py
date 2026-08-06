@@ -107,6 +107,8 @@ def precompute_latents(ae, dataset, device, desc="Caching latents", use_tissue=F
             z_mris.append(ae.encode_mean(mri.unsqueeze(0).to(device)).cpu().squeeze(0))
             atrophy_vecs.append(atrophy_vec)
             atrophy_maps.append(atrophy_map)
+    if len(z_pets) == 0:                       # --no-val-split -> empty val set
+        return (torch.empty(0), torch.empty(0), torch.empty(0), torch.empty(0), None)
     return (torch.stack(z_pets), torch.stack(z_mris),
             torch.stack(atrophy_vecs), torch.stack(atrophy_maps),
             torch.stack(tissue_maps) if use_tissue else None)
@@ -378,7 +380,7 @@ def train_diffusion(ae, unet, conditioner, schedule, latent_std,
         remaining = (time.time() - t0) * (n_epochs - epoch - 1)
 
         val_str = ""
-        if (epoch + 1) % val_every == 0:
+        if (epoch + 1) % val_every == 0 and len(lat_val_ldr) > 0:
             unet.eval()
             if hasattr(conditioner, "eval"):
                 conditioner.eval()
@@ -417,7 +419,7 @@ def train_diffusion(ae, unet, conditioner, schedule, latent_std,
                 epochs_no_improv += val_every
 
         ssim_str = ""
-        if (epoch + 1) % monitor_every == 0:
+        if (epoch + 1) % monitor_every == 0 and len(val_ds) > 0:
             if ema is not None:
                 ema.store(unet); ema.copy_to(unet)
             ssim_val = _monitor_ssim(ae, unet, conditioner, schedule, latent_std,
@@ -472,6 +474,8 @@ def parse_args():
                         "models (e.g. the cond_a/cond_b ablation set).")
     p.add_argument("--atlas-path",     type=str,   default=None,
                    help="Path to MNI DK atlas NIfTI (default: data/raw/mni_dk_atlas.nii.gz)")
+    p.add_argument("--use-controls-322", action="store_true",
+                   help="Use the 322-subject CN+AD+MCI controls_322 cohort + its 2-col split CSVs.")
     p.add_argument("--fold",           type=int,   default=None)
     p.add_argument("--n-folds",        type=int,   default=5)
     p.add_argument("--no-val-split",   action="store_true",
@@ -538,7 +542,7 @@ def main():
         train_frac=train_frac, val_frac=val_frac,
         atlas_path=args.atlas_path, use_tissue=args.use_tissue,
         cond_mode=args.cond_mode, use_mentor_split=args.use_mentor_split,
-        no_val_split=args.no_val_split, **fold_kwargs,
+        no_val_split=args.no_val_split, use_controls_322=args.use_controls_322, **fold_kwargs,
     )
     print(f"train={len(train_ds)}  val={len(val_ds)}  test={len(test_ds)}")
 
@@ -550,7 +554,8 @@ def main():
     schedule    = None
     if args.diff_epochs > 0 or args.eval_only:
         unet_ch       = tuple(int(x) for x in args.unet_channels.split(","))
-        extra_cond_ch = 4 if args.use_tissue else 1   # 1 atrophy (+3 tissue one-hot)
+        _mm = os.environ.get("TAUGENNET_SPATIAL_MAP", "atrophy").lower()
+        extra_cond_ch = 4 if args.use_tissue else (2 if _mm == "both" else 1)
         # Cross-attention conditioner: atrophy MLP / learned-null / frozen-CLIP ptau.
         # The spatial atrophy MAP is always present (extra_cond_ch); cond-mode only
         # changes what (if anything) drives cross-attention.
@@ -558,6 +563,9 @@ def main():
             conditioner = AtrophyConditioner().to(device)
         elif args.cond_mode == "none":
             conditioner = NullConditioner().to(device)
+        elif args.cond_mode == "ptau217_mlp":
+            from src.conditioning import PTau217MLPConditioner
+            conditioner = PTau217MLPConditioner().to(device)
         elif args.cond_mode == "ptau217":
             conditioner = PTau217Conditioner(device=device)
         else:
@@ -633,7 +641,8 @@ def main():
 
     ls_cpu = latent_std.cpu()
     z_pets_tr  /= ls_cpu;  z_mris_tr  /= ls_cpu
-    z_pets_val /= ls_cpu;  z_mris_val /= ls_cpu
+    if z_pets_val.numel() > 0:                 # empty when --no-val-split
+        z_pets_val /= ls_cpu;  z_mris_val /= ls_cpu
 
     lat_train_ds  = SpatialLatentDataset(z_pets_tr,  z_mris_tr,  atrophy_vecs_tr,  atrophy_maps_tr,
                                          tissue_maps=tissue_maps_tr)

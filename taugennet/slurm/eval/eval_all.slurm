@@ -4,16 +4,17 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --gres=gpu:nvidia_a100:1
+#SBATCH --gres=gpu:nvidia_h100_nvl:1
 #SBATCH --mem=32G
 #SBATCH --time=0-04:00:00
 #SBATCH --output=results/logs/eval_all_%j.out
 #SBATCH --error=results/logs/eval_all_%j.err
-#SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=sz3962@princeton.edu
 
-PYTHON=/scratch/network/sz3962/.conda/envs/taugennet/bin/python3
-cd /scratch/network/sz3962/taugennet
+PYTHON=/usr/bin/python3.9
+cd /home/remote/adebnath1/taugennet
+export PYTHONPATH="/home/remote/adebnath1/.local/lib/python3.9/site-packages:/home/remote/adebnath1/taugennet:$PYTHONPATH"
+export TAUGENNET_ROOT="/home/remote/adebnath1/taugennet"
+source scripts/wait_for_fac.sh
 
 echo "=== atrophy / 72split ==="
 $PYTHON scripts/evaluate.py --mode atrophy

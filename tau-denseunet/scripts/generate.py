@@ -40,6 +40,18 @@ def main():
     p.add_argument("--n-folds", type=int, default=N_FOLDS)
     p.add_argument("--mask-mode", choices=["dk86", "wholebrain"], default="dk86",
                    help="dk86 = 86-region atlas mask; wholebrain = T1-seg brain mask.")
+    p.add_argument("--use-suvr", action="store_true",
+                   help="Model expects a painted regional-SUVR 2nd input channel.")
+    p.add_argument("--use-suvr-film", action="store_true",
+                   help="Model expects FiLM conditioning on regional SUVR (alternative to --use-suvr).")
+    p.add_argument("--split", choices=["test", "val"], default="test",
+                   help="Generate against the held-out test set (default) or the validation split.")
+    p.add_argument("--mentor-split-dir", type=str, default=None,
+                   help="Override directory to read heldout_test_split.csv/train_val_split.csv from, "
+                        "isolated from the shared data/raw/ root.")
+    p.add_argument("--use-controls-322", action="store_true",
+                   help="Use the 322-subject controls_322 cohort (CN+MCI+AD). MUST match how the "
+                        "checkpoint was trained, or cached predictions map to the wrong subjects.")
     p.add_argument("--checkpoint", type=str, default=None,
                    help="Defaults to results/checkpoints/<run_tag>/[fold_<i>/]denseunet_best.pt")
     p.add_argument("--out-dir", type=str, default=None,
@@ -61,9 +73,15 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
 
     # Same fold + defaults as the scorer → identical test-set ordering.
+    assert not (args.use_suvr and args.use_suvr_film), "--use-suvr and --use-suvr-film are mutually exclusive"
     fold_kwargs = {} if args.fold is None else {"fold_idx": args.fold, "n_folds": args.n_folds}
     train_ds, val_ds, test_ds, *_ = build_dataloaders(
-        mode=args.mode, use_dk_mask=True, **fold_kwargs)
+        mode=args.mode, use_dk_mask=True, val_frac=0.0,
+        suvr_input=args.use_suvr, suvr_as_cond=args.use_suvr_film,
+        mentor_split_dir=args.mentor_split_dir,
+        use_controls_322=args.use_controls_322, **fold_kwargs)
+    if args.split == "val":
+        test_ds = val_ds
     if args.mask_mode == "wholebrain":
         inject_mask(load_or_build_wholebrain_mask(args.mode), train_ds, val_ds, test_ds)
     tag = run_tag if args.fold is None else f"{run_tag} fold {args.fold}/{args.n_folds}"
@@ -72,18 +90,24 @@ def main():
     # Shared (1,H,W,D) mask — DK86 atlas or injected whole-brain — the region scored.
     dk_mask = test_ds._dk_mask.to(device)
 
-    model = DenseUNet3D(in_ch=1, out_ch=1).to(device)
+    _paint = os.environ.get("TAUGENNET_PAINT", "suvr").lower()
+    _extra = 2 if _paint == "both" else 1
+    model = DenseUNet3D(in_ch=(1 + _extra) if args.use_suvr else 1, out_ch=1, film_cond_dim=86 if args.use_suvr_film else 0).to(device)
+    print(f"[paint={_paint}] DenseUNet in_ch={(1 + _extra) if args.use_suvr else 1}")
     state = torch.load(ckpt, map_location=device)
     model.load_state_dict(state["model"])
     model.eval()
-    print(f"Loaded checkpoint: {ckpt}  (epoch {state.get('epoch')}, "
-          f"val {state.get('val_loss'):.5f})")
+    _vl = state.get('val_loss')
+    _vl_str = f"{_vl:.5f}" if _vl is not None else "n/a (no validation)"
+    print(f"Loaded checkpoint: {ckpt}  (epoch {state.get('epoch')}, val {_vl_str})")
 
     with torch.no_grad():
         for i in range(len(test_ds)):
-            pet, mri, _cond = test_ds[i]
-            mri_b = mri.unsqueeze(0).to(device)        # (1,1,H,W,D)
-            pred = (model(mri_b) * dk_mask).squeeze().cpu().numpy().astype(np.float32)
+            pet, mri, cond = test_ds[i]
+            mri_b = mri.unsqueeze(0).to(device)        # (1,in_ch,H,W,D)
+            cond_b = cond.unsqueeze(0).to(device) if args.use_suvr_film else None
+            out = model(mri_b, cond=cond_b) if args.use_suvr_film else model(mri_b)
+            pred = (out * dk_mask).squeeze().cpu().numpy().astype(np.float32)
             # No clipping: the linear output head can exceed [0,1]; keep raw
             # predictions so over/under-shoot is visible and eval stays honest.
             np.save(os.path.join(out_dir, f"subject_{i:03d}.npy"), pred)

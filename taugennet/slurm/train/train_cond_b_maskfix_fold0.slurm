@@ -4,20 +4,21 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:nvidia_a100:1
+#SBATCH --gres=gpu:nvidia_h100_nvl:1
 #SBATCH --mem=64G
 #SBATCH --time=08:00:00
 #SBATCH --output=results/logs/condb_maskfix_%j.out
 #SBATCH --error=results/logs/condb_maskfix_%j.err
-#SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=sz3962@princeton.edu
 
 # Validate the dataset_spatial mask fix: retrain cond_b (spatial-map only, cond=none)
 # on the SHARED DK86 binary mask the AE was trained on, then generate + evaluate.
 # fold 0 only — quick end-to-end check. Writes to *_maskfix paths (no overwrite).
 
-PYTHON=/home/sz3962/.conda/envs/taugennet/bin/python3
-cd /scratch/network/sz3962/taugennet
+PYTHON=/usr/bin/python3.9
+cd /home/remote/adebnath1/taugennet
+export PYTHONPATH="/home/remote/adebnath1/.local/lib/python3.9/site-packages:/home/remote/adebnath1/taugennet:$PYTHONPATH"
+export TAUGENNET_ROOT="/home/remote/adebnath1/taugennet"
+source scripts/wait_for_fac.sh
 FOLD=0
 AE_CKPT="results/checkpoints/ae_lch8_dk86/ae_checkpoint_best.pt"
 OUTDIR="results/checkpoints/cond_compare_maskfix/spatialmap_none/fold_${FOLD}"

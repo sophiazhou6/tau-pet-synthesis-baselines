@@ -1284,7 +1284,7 @@ if __name__ == "__main__":
     import argparse
 
     p = argparse.ArgumentParser(description="TauGenNet evaluation — canonical script")
-    p.add_argument("--mode",           choices=["atrophy", "ptau217", "ptau217_biobert", "ptau217_mlp", "combined"], required=True)
+    p.add_argument("--mode",           choices=["atrophy", "ptau217", "ptau217_biobert", "ptau217_mlp", "combined", "combined_mlp"], required=True)
     p.add_argument("--checkpoint-dir", type=str, default=None)
     p.add_argument("--figures-dir",    type=str, default=None,
                    help="Subdirectory under results/figures/")
@@ -1310,6 +1310,8 @@ if __name__ == "__main__":
                         "checkpoint do fresh inference; interactive runs use the cache). "
                         "Use --use-cached/--no-use-cached to force either way. Forces "
                         "--skip-ablation (the ablation needs fresh no-MRI inference).")
+    p.add_argument("--rank-by", choices=["pearson","ssim","mae"], default="ssim",
+                   help="Rank glass-brain best/median/worst by this per-subject metric.")
     p.add_argument("--glass-brain",    action=argparse.BooleanOptionalAction, default=True,
                    help="After metrics, render glass-brain/slice/scatter figures via "
                         "glass_brain_final.run_mode using the in-memory SUVR/normalized "
@@ -1321,6 +1323,14 @@ if __name__ == "__main__":
                         "generations that were produced under the legacy split, or index-based "
                         "real↔gen pairing silently mismatches (applies to dataset_final/"
                         "combined/spatial only).")
+    p.add_argument("--use-controls-322", action=argparse.BooleanOptionalAction, default=False,
+                   help="Use the 322-subject CN+AD+MCI controls cohort (data/raw/controls_322/) "
+                        "instead of the legacy AD/MCI split. Applies to dataset_final "
+                        "('atrophy'/ptau modes) and dataset_combined ('combined'/'combined_mlp') "
+                        "only — dataset_spatial has no controls_322 support yet.")
+    p.add_argument("--suvr-as-cond",     action=argparse.BooleanOptionalAction, default=False,
+                   help="Condition on regional SUVR (MLP) instead of/alongside the atrophy map. "
+                        "Only applies to the dataset_final ('atrophy') branch.")
     p.add_argument("--generated-dir",  type=str, default=None,
                    help="Override the cached-generations directory used by --use-cached.")
     p.add_argument("--save-generated", action=argparse.BooleanOptionalAction, default=True,
@@ -1332,9 +1342,12 @@ if __name__ == "__main__":
                    help="Transformer blocks per UNet level — must match training config (default: 3)")
     p.add_argument("--use-best",       action="store_true", default=False,
                    help="Load diff_{mode}_best.pt instead of diff_{mode}.pt")
+    p.add_argument('--eval-on', choices=['test','val'], default='test')
     p.add_argument("--fold",           type=int, default=None,
                    help="CV fold index; evaluate on that fold's exact held-out test set.")
     p.add_argument("--n-folds",        type=int, default=5)
+    p.add_argument("--phase6-manifest", type=str, default=None,
+                   help="Pooled AD+MCI+CN manifest; phase6 test set via dataset_phase6.")
     p.add_argument("--dataset",        choices=["final", "combined", "spatial"], default=None,
                    help="Test-set dataset class. Default: infer from --mode (combined->combined, "
                         "else final). Use 'spatial' for train_spatial_atrophy models "
@@ -1385,30 +1398,40 @@ if __name__ == "__main__":
         from src import dataset_v2_relu as _dataset_v2_relu
         from src import dataset_combined_relu as _dataset_combined_relu
         if COND_MODE == "combined":
-            _, _, test_ds, *_ = _dataset_combined_relu.build_dataloaders(
+            _, _val_ds, test_ds, *_ = _dataset_combined_relu.build_dataloaders(
                 mode=COND_MODE, use_dk_mask=args.use_mask)
         else:
-            _, _, test_ds, *_ = _dataset_v2_relu.build_dataloaders(
+            _, _val_ds, test_ds, *_ = _dataset_v2_relu.build_dataloaders(
                 mode=COND_MODE, use_dk_mask=args.use_mask)
     else:
         fold_kwargs = {} if args.fold is None else {"fold_idx": args.fold, "n_folds": args.n_folds}
-        dataset_choice = args.dataset or ("combined" if COND_MODE == "combined" else "final")
-        if dataset_choice == "spatial":
+        dataset_choice = args.dataset or ("combined" if COND_MODE in ("combined", "combined_mlp") else "final")
+        if getattr(args, "phase6_manifest", None):
+            from src import dataset_phase6 as _p6
+            _p6cm = "combined" if args.cond_mode in ("combined", "combined_mlp") else args.cond_mode
+            _, _val_ds, test_ds, *_ = _p6.build_dataloaders(
+                manifest=args.phase6_manifest, use_dk_mask=args.use_mask,
+                cond_mode=_p6cm, **fold_kwargs)
+        elif dataset_choice == "spatial":
             from src import dataset_spatial as _dataset_spatial
-            _, _, test_ds, *_ = _dataset_spatial.build_dataloaders(
+            _, _val_ds, test_ds, *_ = _dataset_spatial.build_dataloaders(
                 use_dk_mask=args.use_mask, cond_mode=args.cond_mode,
-                use_mentor_split=args.use_mentor_split, **fold_kwargs)
+                use_mentor_split=args.use_mentor_split,
+                use_controls_322=args.use_controls_322, **fold_kwargs)
         elif dataset_choice == "combined":
-            _, _, test_ds, *_ = _dataset_combined.build_dataloaders(
-                mode="combined", use_dk_mask=args.use_mask,
-                use_mentor_split=args.use_mentor_split, **fold_kwargs)
+            _, _val_ds, test_ds, *_ = _dataset_combined.build_dataloaders(
+                mode=COND_MODE, use_dk_mask=args.use_mask,
+                use_mentor_split=args.use_mentor_split, use_controls_322=args.use_controls_322,
+                **fold_kwargs)
         else:
             # ptau217_mlp / ptau217_biobert use the same data as ptau217
             # (1-dim scalar conditioning; only the text/MLP encoder differs)
             dataset_mode = "ptau217" if COND_MODE in ("ptau217_mlp", "ptau217_biobert") else COND_MODE
-            _, _, test_ds, *_ = _dataset_v2.build_dataloaders(
+            _, _val_ds, test_ds, *_ = _dataset_v2.build_dataloaders(
                 mode=dataset_mode, use_dk_mask=args.use_mask,
-                use_mentor_split=args.use_mentor_split, **fold_kwargs)
+                use_mentor_split=args.use_mentor_split, use_controls_322=args.use_controls_322,
+                suvr_as_cond=args.suvr_as_cond, **fold_kwargs)
+        if args.eval_on == 'val': test_ds = _val_ds
 
     print(f"Test subjects: {len(test_ds)}")
 
@@ -1626,6 +1649,7 @@ if __name__ == "__main__":
         gb_dir = os.path.join(FIG_DIR, "glass_brain")
         os.makedirs(gb_dir, exist_ok=True)
         _gb_run_mode(COND_MODE, args.arch, gb_dir, use_dk_mask=args.use_mask,
-                     data=(real_suvr, gb_gen_suvr, real_norm, gen_masked, test_ds))
+                     data=(real_suvr, gb_gen_suvr, real_norm, gen_masked, test_ds),
+                     rank_by=args.rank_by)
 
     print("\nDone.")

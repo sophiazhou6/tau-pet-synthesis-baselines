@@ -50,16 +50,12 @@ CLIP_DIM  = 512   # must match CLIP ViT-B/32 hidden size
 COND_DIM  = 512   # conditioning embedding dimension (both conditioners output this)
 N_REGIONS = 86
 
-# Portable root: set TAUGENNET_ROOT on a new server; defaults to the Princeton path.
-# Mirrors src/config.py so the relu variant is portable too (was hardcoded).
-ROOT = os.environ.get("TAUGENNET_ROOT", "/scratch/network/sz3962/taugennet")
+BASE_DIR          = "/scratch/network/sz3962/taugennet/data/raw"
+CLIP_MODEL_PATH   = "/scratch/network/sz3962/taugennet/clip_model"
+ADNI_FLUID_CSV    = "/scratch/network/sz3962/taugennet/data/raw/ADNI34Tau_withFluidBiomarkers.csv"
+CHECKPOINT_DIR    = "/scratch/network/sz3962/taugennet/results/checkpoints"
+FIGURES_DIR       = "/scratch/network/sz3962/taugennet/results/figures"
+GENERATED_DIR     = "/scratch/network/sz3962/taugennet/data/generated"
 
-BASE_DIR          = os.path.join(ROOT, "data/raw")
-CLIP_MODEL_PATH   = os.path.join(ROOT, "clip_model")
-ADNI_FLUID_CSV    = os.path.join(ROOT, "data/raw/ADNI34Tau_withFluidBiomarkers.csv")
-CHECKPOINT_DIR    = os.path.join(ROOT, "results/checkpoints")
-FIGURES_DIR       = os.path.join(ROOT, "results/figures")
-GENERATED_DIR     = os.path.join(ROOT, "data/generated")
-
-AE_CHECKPOINT_PATH   = os.path.join(ROOT, "results/checkpoints/taugennet_checkpoint_relu_v160.pt")
-DIFF_CHECKPOINT_PATH = os.path.join(ROOT, "results/checkpoints/taugennet_checkpoint_relu_epochs.pt")
+AE_CHECKPOINT_PATH   = "/scratch/network/sz3962/taugennet/results/checkpoints/taugennet_checkpoint_relu_v160.pt"
+DIFF_CHECKPOINT_PATH = "/scratch/network/sz3962/taugennet/results/checkpoints/taugennet_checkpoint_relu_epochs.pt"

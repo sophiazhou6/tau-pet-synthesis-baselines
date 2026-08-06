@@ -25,8 +25,8 @@ import os
 import subprocess
 import sys
 
-PYTHON = os.environ.get("TAUGENNET_PYTHON", "/home/sz3962/.conda/envs/taugennet/bin/python3")
-ROOT   = os.environ.get("TAUGENNET_ROOT", "/scratch/network/sz3962/taugennet")
+PYTHON = "/home/sz3962/.conda/envs/taugennet/bin/python3"
+ROOT   = "/scratch/network/sz3962/taugennet"
 SLURM  = os.path.join(ROOT, "slurm/train/train_cv.slurm")
 
 

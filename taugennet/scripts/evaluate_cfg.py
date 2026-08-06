@@ -62,7 +62,7 @@ from src.inference import load_models, _prepare_cond
 
 @torch.no_grad()
 def generate_all_cfg(ae, unet, schedule, encode_cond, latent_std, test_ds,
-                     cond_mode, guidance_scale=3.0, n_steps=500, save_dir=None):
+                     cond_mode, guidance_scale=3.0, n_steps=500, save_dir=None, k=1):
     """Run CFG-guided DDPM inference on every test subject.
 
     Two U-Net passes per step:
@@ -95,17 +95,22 @@ def generate_all_cfg(ae, unet, schedule, encode_cond, latent_std, test_ds,
             zm     = ae.encode_mean(mri_t) / latent_std
             ctx      = encode_cond(cond_t)
             ctx_null = torch.zeros_like(ctx)
-            zt = torch.randn_like(zm)
 
-            for t_idx in tqdm(ts, desc=f"  s{i:03d}", leave=False):
-                t_batch    = torch.full((1,), t_idx, device=DEVICE, dtype=torch.long)
-                ht         = torch.cat([zt, zm], dim=1)
-                eps_cond   = unet(ht, t_batch, ctx)
-                eps_uncond = unet(ht, t_batch, ctx_null)
-                eps_guided = eps_uncond + guidance_scale * (eps_cond - eps_uncond)
-                zt = schedule.p_sample_from_eps(zt, t_idx, eps_guided)
-
-            gen = ae.decode(zt * latent_std).squeeze().cpu().numpy()
+            # k>1: POSTERIOR MEAN of CFG-guided samples. CFG and the posterior mean each
+            # independently raise PEAK-region R; this lets them be combined.
+            acc = None
+            for _ in range(k):
+                zt = torch.randn_like(zm)
+                for t_idx in tqdm(ts, desc=f"  s{i:03d}", leave=False):
+                    t_batch    = torch.full((1,), t_idx, device=DEVICE, dtype=torch.long)
+                    ht         = torch.cat([zt, zm], dim=1)
+                    eps_cond   = unet(ht, t_batch, ctx)
+                    eps_uncond = unet(ht, t_batch, ctx_null)
+                    eps_guided = eps_uncond + guidance_scale * (eps_cond - eps_uncond)
+                    zt = schedule.p_sample_from_eps(zt, t_idx, eps_guided)
+                g = ae.decode(zt * latent_std).squeeze().cpu().numpy()
+                acc = g if acc is None else acc + g
+            gen = (acc / k).astype(np.float32)
 
             if gen_path:
                 np.save(gen_path, gen)
@@ -130,7 +135,8 @@ def generate_all_cfg(ae, unet, schedule, encode_cond, latent_std, test_ds,
 
 def main():
     p = argparse.ArgumentParser(description="TauGenNet CFG evaluation")
-    p.add_argument("--mode",           choices=["atrophy", "ptau217", "combined"], required=True)
+    p.add_argument('--eval-on', choices=['test','val'], default='test')
+    p.add_argument("--mode",           choices=["atrophy", "ptau217", "ptau217_mlp", "combined", "combined_mlp"], required=True)
     p.add_argument("--checkpoint-dir", type=str, default=None,
                    help="Directory containing diff_{mode}_best.pt (default: results/checkpoints/cfg/<mode>)")
     p.add_argument("--figures-dir",    type=str, default=None,
@@ -140,7 +146,17 @@ def main():
     p.add_argument("--generated-dir",  type=str, default=None,
                    help="Directory for generated .npy files (default: results/generated/cfg/<mode>)")
     p.add_argument("--use-mask",       action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--use-controls-322", action="store_true", default=False,
+                   help="Evaluate on the 322-subject CN+AD+MCI controls cohort.")
+    p.add_argument("--suvr-as-cond", action="store_true", default=False,
+                   help="Evaluate the regional-SUVR-as-conditioning variant (mode must be atrophy).")
+    p.add_argument("--use-mentor-split", action=argparse.BooleanOptionalAction, default=False,
+                   help="MUST match how the checkpoint was trained. Legacy CFG models: leave off. "
+                        "New mentor-split CFG models: pass --use-mentor-split.")
     p.add_argument("--n-steps",        type=int, default=500)
+    p.add_argument("--k",              type=int, default=1,
+                   help="samples per subject to average (posterior mean of CFG-guided draws). "
+                        "k=1 = single sample; k=16 combines CFG with the posterior mean.")
     p.add_argument("--guidance-scale", type=float, default=None,
                    help="CFG guidance scale (default: read from checkpoint, fallback 3.0)")
     p.add_argument("--unet-channels",  type=str, default="128,256,512")
@@ -170,14 +186,18 @@ def main():
     print(f"Generated → {gen_dir}")
 
     # ── Dataset ───────────────────────────────────────────────────────────────
-    # CFG checkpoints are legacy-trained -> force the legacy split (avoid mentor-split leakage).
-    if mode == "combined":
-        _, _, test_ds, *_ = _dataset_combined.build_dataloaders(
-            mode=mode, use_dk_mask=args.use_mask, use_mentor_split=False)
+    # Split MUST match how the CFG checkpoint was trained. Legacy CFG checkpoints ->
+    # --no-use-mentor-split; new mentor-split CFG models -> default (mentor).
+    if mode in ("combined", "combined_mlp"):
+        _, _val_ds, test_ds, *_ = _dataset_combined.build_dataloaders(
+            mode=("combined" if mode=="combined_mlp" else mode), use_dk_mask=args.use_mask, use_mentor_split=args.use_mentor_split,
+            use_controls_322=args.use_controls_322)
     else:
-        _, _, test_ds, *_ = _dataset_v2.build_dataloaders(
-            mode=mode, use_dk_mask=args.use_mask, use_mentor_split=False)
-    print(f"Test subjects: {len(test_ds)}")
+        _, _val_ds, test_ds, *_ = _dataset_v2.build_dataloaders(
+            mode=mode, use_dk_mask=args.use_mask, use_mentor_split=args.use_mentor_split,
+            use_controls_322=args.use_controls_322, suvr_as_cond=args.suvr_as_cond)
+    if args.eval_on == 'val': test_ds = _val_ds
+    print(f"Test subjects: {len(test_ds)}  (mentor_split={args.use_mentor_split})")
 
     # ── Inference ─────────────────────────────────────────────────────────────
     if args.use_cached:
@@ -202,7 +222,7 @@ def main():
             generate_all_cfg(
                 ae, unet, schedule, conditioner.encode, latent_std, test_ds,
                 cond_mode=mode, guidance_scale=guidance_scale,
-                n_steps=args.n_steps, save_dir=gen_dir,
+                n_steps=args.n_steps, save_dir=gen_dir, k=args.k,
             )
 
     # ── Metrics & figures (identical to evaluate_final) ───────────────────────

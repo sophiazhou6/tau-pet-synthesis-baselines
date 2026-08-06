@@ -305,6 +305,52 @@ class CombinedConditioner(nn.Module):
         return self
 
 
+class CombinedMLPConditioner(nn.Module):
+    """Like CombinedConditioner but ptau217 uses a learned MLP instead of frozen CLIP.
+
+    Atrophy → AtrophyConditioner MLP    → (B, 16, 512)
+    ptau217 → PTau217MLPConditioner MLP → (B, n, 512)
+    Output  → concatenated along dim=1
+
+    BOTH branches are trainable here (no frozen CLIP), so state_dict carries both.
+    """
+
+    out_dim = COND_DIM
+
+    def __init__(self, device=DEVICE):
+        super().__init__()
+        self.atrophy = AtrophyConditioner().to(device)
+        self.ptau    = PTau217MLPConditioner().to(device)
+
+    def encode(self, cond):
+        """cond : (B, 87) — first 86 dims = atrophy, last 1 = ptau217."""
+        atrophy_tokens = self.atrophy.encode(cond[:, :86])
+        ptau_tokens    = self.ptau.encode(cond[:, 86:])
+        return torch.cat([atrophy_tokens, ptau_tokens], dim=1)
+
+    def forward(self, x):
+        return self.encode(x)
+
+    def trainable_parameters(self):
+        return list(self.atrophy.parameters()) + list(self.ptau.parameters())
+
+    def state_dict(self):
+        return {"atrophy": self.atrophy.state_dict(), "ptau": self.ptau.state_dict()}
+
+    def load_state_dict(self, sd, strict=True):
+        self.atrophy.load_state_dict(sd["atrophy"])
+        self.ptau.load_state_dict(sd["ptau"])
+
+    def train(self, mode=True):
+        self.atrophy.train(mode); self.ptau.train(mode); return self
+
+    def eval(self):
+        self.atrophy.eval(); self.ptau.eval(); return self
+
+    def to(self, device):
+        self.atrophy = self.atrophy.to(device); self.ptau = self.ptau.to(device); return self
+
+
 # ── tissue-type conditioner ──────────────────────────────────────────────────
 
 class TissueTypeConditioner(nn.Module):
@@ -584,6 +630,8 @@ def build_conditioner(mode: str, device=DEVICE):
         return AtrophyConditioner().to(device)
     if mode == "combined":
         return CombinedConditioner(device=device)
+    if mode == "combined_mlp":
+        return CombinedMLPConditioner(device=device)
     if mode == "combined_tissue":
         return CombinedWithTissueConditioner(device=device)
     if mode == "combined_demo":

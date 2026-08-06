@@ -37,8 +37,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from denseunet.config import TAUGENNET_ROOT, REPO_ROOT, GENERATED_DIR, N_FOLDS  # noqa: E402
 
-FIGURES_DIR = os.path.join(REPO_ROOT, "results", "figures")
-RECORDS_DIR = os.path.join(REPO_ROOT, "results", "records")
+FIGURES_DIR = os.path.join(REPO_ROOT, "results", "figures", "denseunet_baseline")
+RECORDS_DIR = os.path.join(REPO_ROOT, "results", "records", "denseunet_baseline")
 
 
 def main():
@@ -50,15 +50,19 @@ def main():
     p.add_argument("--n-folds", type=int, default=N_FOLDS)
     p.add_argument("--generated-dir", default=None,
                    help="Cached predictions dir (default: results/generated/<mode>/[fold_<i>]).")
+    p.add_argument("--out-tag", type=str, default=None,
+                   help="Isolate this run's records/figures under <mode>_<out-tag>/ instead of "
+                        "the default <mode>/ path (use when comparing conditioning variants).")
     args, extra = p.parse_known_args()
 
     fold_sub = "" if args.fold is None else f"fold_{args.fold}"
+    out_mode = args.mode if not args.out_tag else f"{args.mode}_{args.out_tag}"
     gen_dir = args.generated_dir or os.path.join(GENERATED_DIR, args.mode, fold_sub)
-    fig_dir = os.path.join(FIGURES_DIR, args.mode, fold_sub)  # absolute → overrides taugennet FIGURES_DIR
+    fig_dir = os.path.join(FIGURES_DIR, out_mode, fold_sub)  # absolute → overrides taugennet FIGURES_DIR
     # Per-fold records live under results/records/cv_<mode>/fold_<i>/ so
     # aggregate_cv_eval.py can sweep fold_*/metrics.json. Single-split → results/records/.
     rec_dir = (RECORDS_DIR if args.fold is None
-               else os.path.join(RECORDS_DIR, f"cv_{args.mode}", fold_sub))
+               else os.path.join(RECORDS_DIR, f"cv_{out_mode}", fold_sub))
     if not os.path.isdir(gen_dir) or not any(f.endswith(".npy") for f in os.listdir(gen_dir)):
         sys.exit(f"No cached predictions in {gen_dir}. Run scripts/generate.py --mode "
                  f"{args.mode}{'' if args.fold is None else f' --fold {args.fold}'} first.")

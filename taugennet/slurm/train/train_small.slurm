@@ -4,22 +4,23 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:nvidia_a100:1
+#SBATCH --gres=gpu:nvidia_h100_nvl:1
 #SBATCH --mem=64G
 #SBATCH --time=6:00:00
 #SBATCH --output=results/logs/taugennet_small_%j.out
 #SBATCH --error=results/logs/taugennet_small_%j.err
-#SBATCH --mail-type=BEGIN,END,FAIL
-#SBATCH --mail-user=sz3962@princeton.edu
 
 # Small architecture: ch_list=(128,256,512), n_transformer=1
 # Reduced-capacity model for model-size comparison vs train_large.slurm
 # Uses existing shared AE checkpoint — no AE retraining.
 
-PYTHON=/home/sz3962/.conda/envs/taugennet/bin/python3
+PYTHON=/usr/bin/python3.9
 AE_CKPT=results/checkpoints/taugennet_checkpoint_postact.pt
 
-cd /scratch/network/sz3962/taugennet
+cd /home/remote/adebnath1/taugennet
+export PYTHONPATH="/home/remote/adebnath1/.local/lib/python3.9/site-packages:/home/remote/adebnath1/taugennet:$PYTHONPATH"
+export TAUGENNET_ROOT="/home/remote/adebnath1/taugennet"
+source scripts/wait_for_fac.sh
 
 mkdir -p results/logs \
          results/checkpoints/small_arch \

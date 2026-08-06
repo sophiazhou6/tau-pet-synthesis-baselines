@@ -4,19 +4,20 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --gres=gpu:nvidia_a100:1
+#SBATCH --gres=gpu:nvidia_h100_nvl:1
 #SBATCH --mem=64G
 #SBATCH --time=01:00:00
 #SBATCH --output=results/logs/cfg_hi_%j.out
 #SBATCH --error=results/logs/cfg_hi_%j.err
-#SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=sz3962@princeton.edu
 
 # Extend the CFG guidance sweep: w=0/1/3/5 climbed monotonically (0.374->0.426, still rising).
 # This finds where per-subject voxel R saturates (or degrades from over-guidance).
 # Same CFG-trained combined model + legacy split; each w -> isolated gen dir, DK86 SUVR eval.
-PY=/home/sz3962/.conda/envs/taugennet/bin/python3
-cd /scratch/network/sz3962/taugennet
+PY=/usr/bin/python3.9
+cd /home/remote/adebnath1/taugennet
+export PYTHONPATH="/home/remote/adebnath1/.local/lib/python3.9/site-packages:/home/remote/adebnath1/taugennet:$PYTHONPATH"
+export TAUGENNET_ROOT="/home/remote/adebnath1/taugennet"
+source scripts/wait_for_fac.sh
 mkdir -p results/logs
 echo "Job $SLURM_JOB_ID  Node: $SLURM_NODELIST  Start: $(date)"; nvidia-smi --query-gpu=name --format=csv,noheader
 

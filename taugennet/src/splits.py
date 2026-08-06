@@ -26,8 +26,8 @@ Every dataset_*.py build_dataloaders should route its split through
 import csv
 import os
 
-TEST_CSV = "heldout_test_split.csv"
-DEV_CSV  = "train_val_split.csv"
+TEST_CSV = os.environ.get("MENTOR_TEST_CSV", "heldout_test_split.csv")
+DEV_CSV  = os.environ.get("MENTOR_DEV_CSV", "train_val_split.csv")
 
 
 def _norm_rid(value) -> str:
@@ -109,9 +109,11 @@ def assign_indices(rids, *, fold_idx, n_folds, seed, val_frac_of_dev,
         if not (0 <= fold_idx < n_folds):
             raise ValueError(f"fold_idx {fold_idx} out of range [0,{n_folds})")
         val_rids = stratified_kfold_val_sets(present_dev, n_folds, seed)[fold_idx]
-    else:
-        k = max(2, round(1.0 / val_frac_of_dev)) if val_frac_of_dev else n_folds
+    elif val_frac_of_dev and val_frac_of_dev > 0:
+        k = max(2, round(1.0 / val_frac_of_dev))
         val_rids = stratified_kfold_val_sets(present_dev, k, seed)[0]
+    else:
+        val_rids = set()  # val_frac_of_dev == 0 (falsy) -> no held-out validation, bug fix 2026-07-23
 
     train_idx, val_idx, test_idx = [], [], []
     for i, r in enumerate(rids):

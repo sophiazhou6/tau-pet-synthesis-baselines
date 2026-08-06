@@ -28,7 +28,7 @@ cd $HOME/taugennet
 export PYTHONPATH=$HOME/.local/lib/python3.9/site-packages:$HOME/taugennet:$PYTHONPATH
 export TAUGENNET_ROOT=$HOME/taugennet
 
-AE_CKPT="results/checkpoints/ae_lch8_dk86/ae_checkpoint_best.pt"
+AE_CKPT=results/checkpoints/paper_aligned/ae/fold_0/taugennet_checkpoint_best.pt
 OUTDIR="results/checkpoints/spatial_atrophy_encoder/fold_0"
 FIGDIR="results/figures/spatial_atrophy_encoder/fold_0"
 GENDIR="results/generated/spatial_atrophy_encoder/atrophy/fold_0"
@@ -42,7 +42,7 @@ echo "=== [1/3] Training ==="
 $PYTHON scripts/train_spatial_atrophy.py \
     --skip-ae \
     --ae-checkpoint "${AE_CKPT}" \
-    --latent-ch 8 \
+    --latent-ch 3 \
     --unet-channels 128,256,512 \
     --n-transformer 1 \
     --diff-epochs 2000 \
@@ -60,7 +60,7 @@ echo "=== [2/3] Generating (DDPM, 500 steps, fold-0 held-out test set) ==="
 $PYTHON scripts/generate_spatial.py \
     --checkpoint "${OUTDIR}/diff_spatial_atrophy_best.pt" \
     --generated-dir "${GENDIR}" \
-    --latent-ch 8 \
+    --latent-ch 3 \
     --unet-channels 128,256,512 \
     --n-transformer 1 \
     --n-steps 500 \

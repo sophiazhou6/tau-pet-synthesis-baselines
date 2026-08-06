@@ -33,7 +33,7 @@ from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 
 from src.config import (DEVICE, T_STEPS, LR, AE_EPOCHS, DIFF_EPOCHS, BATCH_SIZE,
-                        AE_CHECKPOINT_PATH, CHECKPOINT_DIR, FIGURES_DIR, LATENT_CH)
+                        AE_CHECKPOINT_PATH, CHECKPOINT_DIR, FIGURES_DIR, LATENT_CH, LATENT_SCALE)
 from src import dataset_final     as _dataset_final
 from src import dataset_combined as _dataset_combined
 from src.models       import Autoencoder3D, DenoisingUNet3D
@@ -165,6 +165,7 @@ def train_ae(ae, train_loader, n_epochs, ckpt_path, device,
                 torch.save({"ae": ae.state_dict(), "ae_losses": train_losses,
                             "ae_val_losses": list(zip(val_epochs_list, val_losses_list)),
                             "latent_ch": ae.latent_ch,
+                            "ae_scale": ae.scale, "ae_res_blocks": ae.n_res_blocks,
                             "epoch": epoch + 1}, best_ckpt_path)
             else:
                 epochs_no_improv += val_every
@@ -182,6 +183,7 @@ def train_ae(ae, train_loader, n_epochs, ckpt_path, device,
             torch.save({"ae": ae.state_dict(), "ae_losses": train_losses,
                         "ae_val_losses": list(zip(val_epochs_list, val_losses_list)),
                         "latent_ch": ae.latent_ch,
+                        "ae_scale": ae.scale, "ae_res_blocks": ae.n_res_blocks,
                         "ae_opt": ae_opt.state_dict(), "scaler": scaler.state_dict(),
                         "epoch": epoch + 1}, ckpt_path)
 
@@ -378,7 +380,8 @@ def train_diffusion(ae, unet, conditioner, schedule, latent_std,
                 _save_diff_ckpt(best_ckpt_path, ae, unet, conditioner, latent_std,
                                 losses, epoch + 1,
                                 diff_val_losses=list(zip(val_epochs_list, val_losses_list)),
-                                ema=ema)
+                                ema=ema,
+                                noise_schedule=getattr(schedule, "schedule_name", "linear"))
             else:
                 epochs_no_improv += val_every
 
@@ -404,7 +407,8 @@ def train_diffusion(ae, unet, conditioner, schedule, latent_std,
             _save_diff_ckpt(ckpt_path, ae, unet, conditioner, latent_std,
                             losses, epoch + 1,
                             diff_val_losses=list(zip(val_epochs_list, val_losses_list)),
-                            ema=ema)
+                            ema=ema,
+                            noise_schedule=getattr(schedule, "schedule_name", "linear"))
 
         # ── Early stopping ────────────────────────────────────────────────────
         if epochs_no_improv >= patience:
@@ -433,13 +437,18 @@ def train_diffusion(ae, unet, conditioner, schedule, latent_std,
 
 
 def _save_diff_ckpt(path, ae, unet, conditioner, latent_std, diff_losses, epoch,
-                    diff_val_losses=None, ema=None):
+                    diff_val_losses=None, ema=None, noise_schedule="linear"):
     ckpt = {
         "ae":             ae.state_dict(),
         "unet":           unet.state_dict(),   # raw weights (resume-safe)
         "conditioner":    conditioner.state_dict(),
         "latent_std":     latent_std.cpu(),
         "latent_ch":      ae.latent_ch,
+        # AE architecture, so inference/eval can rebuild the exact encoder-decoder that was
+        # trained (paper spec = 2 residual blocks per level). Absent on pre-2026-07 checkpoints.
+        "ae_scale":       getattr(ae, "scale", LATENT_SCALE),
+        "ae_res_blocks":  getattr(ae, "n_res_blocks", 1),
+        "noise_schedule": noise_schedule,   # sampler MUST match this or samples corrupt
         "diff_losses":    diff_losses,
         "diff_val_losses": diff_val_losses or [],
         "epoch":          epoch,
@@ -529,6 +538,17 @@ def parse_args():
                    help="Number of folds for k-fold CV (default 5)")
     p.add_argument("--latent-ch",      type=int, default=LATENT_CH,
                    help="Latent channel count (must match the AE checkpoint)")
+    p.add_argument("--noise-schedule", choices=["linear", "cosine"], default="linear",
+                   help="DDPM beta schedule. Persisted in the checkpoint; sampling MUST use the "
+                        "same one or samples are silently corrupted.")
+    p.add_argument("--latent-scale",   type=int, default=LATENT_SCALE, choices=[4, 8, 16],
+                   help="AE downsampling factor = latent SPATIAL resolution. 96x112x96 -> "
+                        "4:(24x28x24)  8:(12x14x12, default)  16:(6x7x6). Grid axis 1.")
+    p.add_argument("--ae-res-blocks",  type=int, default=2,
+                   help="AE depth: residual blocks per encoder/decoder level. Default 2 = the "
+                        "TauGenNet paper spec ('four levels ... each containing two residual "
+                        "blocks'). Use 1 to reproduce the pre-2026-07 architecture. Loading an "
+                        "existing AE (--skip-ae) always uses that checkpoint's own value.")
     p.add_argument("--lr",             type=float, default=LR,
                    help="Learning rate for diffusion AdamW optimizer (default 1e-4)")
     p.add_argument("--kl-weight",      type=float, default=1e-4,
@@ -577,7 +597,21 @@ def main():
     print(f"Mode: {args.mode}  |  train={len(train_ds)}  val={len(val_ds)}  test={len(test_ds)}")
 
     # ── Models ────────────────────────────────────────────────────────────────
-    ae          = Autoencoder3D(latent_ch=args.latent_ch).to(device)
+    # When skipping AE training, rebuild the AE at the CHECKPOINT's architecture, not the CLI
+    # default — older checkpoints predate ae_scale/ae_res_blocks, so fall back to the original
+    # 8x / 1-resblock spec. Without this, the new --ae-res-blocks default (2) would fail to load them.
+    ae_scale, ae_rb = args.latent_scale, args.ae_res_blocks
+    if (args.skip_ae or getattr(args, "eval_only", False)) and os.path.exists(args.ae_checkpoint):
+        _peek    = torch.load(args.ae_checkpoint, map_location="cpu")
+        ae_scale = _peek.get("ae_scale", LATENT_SCALE)
+        ae_rb    = _peek.get("ae_res_blocks", 1)
+        del _peek
+        print(f"AE arch taken from checkpoint: scale={ae_scale}  res_blocks/level={ae_rb}")
+    ae          = Autoencoder3D(latent_ch=args.latent_ch, scale=ae_scale,
+                                n_res_blocks=ae_rb).to(device)
+    print(f"AE: latent_ch={args.latent_ch}  scale={ae_scale} "
+          f"(latent {96//ae_scale}x{112//ae_scale}x{96//ae_scale})  "
+          f"res_blocks/level={ae_rb}")
     print(f"AE params:   {sum(p.numel() for p in ae.parameters()):,}")
 
     # Only create UNet/conditioner/schedule if doing diffusion training
@@ -591,7 +625,8 @@ def main():
                                       context_dim=conditioner.out_dim,
                                       ch_list=unet_ch,
                                       n_transformer=args.n_transformer).to(device)
-        schedule    = DiffusionSchedule(device=device)
+        schedule    = DiffusionSchedule(device=device, schedule=args.noise_schedule)
+        print(f"Noise schedule: {args.noise_schedule}")
         print(f"UNet params: {sum(p.numel() for p in unet.parameters()):,}")
         extra = sum(p.numel() for p in conditioner.trainable_parameters())
         if extra:

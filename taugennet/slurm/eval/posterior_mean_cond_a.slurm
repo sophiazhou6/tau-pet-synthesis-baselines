@@ -4,18 +4,19 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --gres=gpu:nvidia_a100:1
+#SBATCH --gres=gpu:nvidia_h100_nvl:1
 #SBATCH --mem=64G
 #SBATCH --time=02:00:00
 #SBATCH --output=results/logs/postmean_a_%j.out
 #SBATCH --error=results/logs/postmean_a_%j.err
-#SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=sz3962@princeton.edu
 
 # Diffusion posterior mean (K=16 samples/subject) for cond_a atrophy, then eval
 # (voxel Pearson + glass brain). Tests if averaging recovers DenseUNet-like fidelity.
-PY=/home/sz3962/.conda/envs/taugennet/bin/python3
-cd /scratch/network/sz3962/taugennet
+PY=/usr/bin/python3.9
+cd /home/remote/adebnath1/taugennet
+export PYTHONPATH="/home/remote/adebnath1/.local/lib/python3.9/site-packages:/home/remote/adebnath1/taugennet:$PYTHONPATH"
+export TAUGENNET_ROOT="/home/remote/adebnath1/taugennet"
+source scripts/wait_for_fac.sh
 GEN="results/generated/posterior_mean/cond_a_mlp/fold_0"
 REC="results/records/posterior_mean/cond_a_mlp"
 mkdir -p "$GEN" "$REC" results/logs

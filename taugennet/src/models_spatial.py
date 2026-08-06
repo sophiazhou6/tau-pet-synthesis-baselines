@@ -343,7 +343,7 @@ class DenoisingUNet3D(nn.Module):
         self.use_spade  = use_spade
         self._tissue_ch = extra_cond_ch - 1 if extra_cond_ch >= 4 else 0
         self.atrophy_encoder = (
-            AtrophyEncoder3D(in_ch=1, width=atrophy_encoder_width, out_ch=1)
+            AtrophyEncoder3D(in_ch=extra_cond_ch, width=atrophy_encoder_width, out_ch=extra_cond_ch)
             if use_atrophy_encoder else None
         )
 

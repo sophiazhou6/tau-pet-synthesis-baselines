@@ -108,7 +108,8 @@ class SpatialTauPETDataset(Dataset):
 
     def __init__(self, pet_paths, mri_paths, atrophy_vecs, diagnoses,
                  atlas_data, inv_atlas_affine, use_dk_mask=True, use_tissue=False,
-                 cond_mode="atrophy", ptau_vals=None):
+                 cond_mode="atrophy", ptau_vals=None, suvr_vecs=None):
+        self.suvr_vecs = suvr_vecs   # not None -> paint a 2nd channel (SUVR)
         self.pet_paths       = pet_paths
         self.mri_paths       = mri_paths
         self.atrophy_vecs    = atrophy_vecs      # list of (86,) np.float32 arrays (always: builds the map)
@@ -197,7 +198,7 @@ class SpatialTauPETDataset(Dataset):
         pet         = self._to_tensor(pet_vol, mask)
         mri         = self._to_tensor(mri_vol, mask)
         # cross-attention input ("cond_vec"): ptau (1,) in ptau217 mode, else atrophy z-scores (86,)
-        if self.cond_mode == "ptau217":
+        if self.cond_mode in ("ptau217", "ptau217_mlp"):
             cond_vec = torch.tensor(self.ptau_vals[idx], dtype=torch.float32)
         else:
             cond_vec = torch.tensor(self.atrophy_vecs[idx], dtype=torch.float32)
@@ -210,6 +211,14 @@ class SpatialTauPETDataset(Dataset):
         # Resize atrophy_map to VOL_SHAPE
         atrophy_map = F.interpolate(atrophy_map.unsqueeze(0), size=VOL_SHAPE,
                                     mode="trilinear", align_corners=False).squeeze(0)
+        if getattr(self, "suvr_vecs", None) is not None:
+            _suvr_map = build_atrophy_volume(
+                mri_vol.shape, mri_affine,
+                self._atlas_data, self._inv_atlas_aff,
+                self.suvr_vecs[idx])
+            _suvr_map = F.interpolate(_suvr_map.unsqueeze(0), size=VOL_SHAPE,
+                                      mode="trilinear", align_corners=False).squeeze(0)
+            atrophy_map = torch.cat([atrophy_map, _suvr_map], dim=0)   # (2, *VOL_SHAPE)
         diagnosis   = torch.tensor(self.diagnoses[idx], dtype=torch.long)
         if self.use_tissue:
             tissue = self._load_tissue(self.mri_paths[idx], mask)
@@ -222,7 +231,7 @@ class SpatialTauPETDataset(Dataset):
 def _build_rid_to_mri_and_diagnosis(base_dir):
     rid_to_mri  = {}
     rid_to_diag = {}
-    for cohort, label in [("1mm_parcellated_AD_subj", 1), ("1mm_parcellated_MCI_subj", 0)]:
+    for cohort, label in [("1mm_parcellated_AD_subj", 1), ("1mm_parcellated_MCI_subj", 0), ("1mm_parcellated_CN_subj", 2)]:
         for subj_dir in sorted(glob.glob(os.path.join(base_dir, cohort, "*"))):
             rid = os.path.basename(subj_dir).split("_")[-1]
             mri = os.path.join(subj_dir, "T1_to_MNI_nonlin.nii.gz")
@@ -297,7 +306,8 @@ def _build_rid_to_ptau(fluid_csv):
 def build_dataloaders(base_dir=BASE_DIR, batch_size=BATCH_SIZE, seed=SEED,
                       use_dk_mask=True, train_frac=0.64, val_frac=0.16,
                       atlas_path=None, fold_idx=None, n_folds=5, use_tissue=False,
-                      cond_mode="atrophy", use_mentor_split=True, no_val_split=False):
+                      cond_mode="atrophy", use_mentor_split=True, no_val_split=False,
+                      use_controls_322=False, controls_dir=None):
     """
     Returns train_ds, val_ds, test_ds, train_loader, val_loader, test_loader.
 
@@ -328,10 +338,18 @@ def build_dataloaders(base_dir=BASE_DIR, batch_size=BATCH_SIZE, seed=SEED,
     # Spatial-map source: atrophy (default) or regional SUVR (env TAUGENNET_SPATIAL_MAP=suvr).
     # In "suvr" mode the painted spatial channel carries regional tau-SUVR instead of atrophy
     # z-scores; the cross-attention cond_vec, model, and checkpoint are all unchanged.
-    use_suvr_map = os.environ.get("TAUGENNET_SPATIAL_MAP", "atrophy").lower() == "suvr"
-    rid_to_suvr  = _build_rid_to_suvr(base_dir) if use_suvr_map else {}
-    use_ptau = (cond_mode == "ptau217")
-    rid_to_ptau = _build_rid_to_ptau(ADNI_FLUID_CSV) if use_ptau else {}
+    _map_mode     = os.environ.get("TAUGENNET_SPATIAL_MAP", "atrophy").lower()
+    use_suvr_map  = _map_mode == "suvr"
+    use_both_maps = _map_mode == "both"   # ch0 = atrophy, ch1 = SUVR
+    if use_controls_322 and controls_dir is None:
+        controls_dir = os.path.join(base_dir, "controls_322")
+    rid_to_suvr  = _build_rid_to_suvr(controls_dir if use_controls_322 else base_dir) \
+                   if (use_suvr_map or use_both_maps) else {}
+    use_ptau = cond_mode in ("ptau217", "ptau217_mlp")
+    # Cohort-matching only: restrict to subjects WITH a p-tau value without conditioning on it,
+    # so a no-plasma arm can be compared against a plasma arm on identical subjects.
+    _require_ptau = os.environ.get("TAUGENNET_REQUIRE_PTAU", "0") == "1"
+    rid_to_ptau = _build_rid_to_ptau(ADNI_FLUID_CSV) if (use_ptau or _require_ptau) else {}
     print(f"MRI subjects: {len(rid_to_mri)}  |  Atrophy subjects: {len(rid_to_atrophy)}"
           + (f"  |  SUVR subjects: {len(rid_to_suvr)}" if use_suvr_map else "")
           + (f"  |  p-tau217 subjects: {len(rid_to_ptau)}" if use_ptau else ""))
@@ -341,7 +359,14 @@ def build_dataloaders(base_dir=BASE_DIR, batch_size=BATCH_SIZE, seed=SEED,
 
     # Mentor's fixed split (Anil): test = heldout_test_split.csv, CV pool =
     # train_val_split.csv. Subjects in neither file are dropped (`keep`).
-    if use_mentor_split:
+    if use_controls_322:
+        from .dataset_final import _load_controls_322_splits
+        use_mentor_split = True   # controls_322 reuses the fixed-split index path below
+        test_dict, dev_dict = _load_controls_322_splits(controls_dir)
+        keep = keep_set(test_dict, dev_dict)
+        print(f"controls_322 split: {len(test_dict)} heldout_test + {len(dev_dict)} dev "
+              f"(subjects not in either file are dropped)")
+    elif use_mentor_split:
         test_dict, dev_dict = load_mentor_splits(base_dir)
         keep = keep_set(test_dict, dev_dict)
         print(f"Mentor split: {len(test_dict)} heldout_test + {len(dev_dict)} dev "
@@ -350,7 +375,8 @@ def build_dataloaders(base_dir=BASE_DIR, batch_size=BATCH_SIZE, seed=SEED,
         test_dict = dev_dict = keep = None
 
     pet_paths, mri_paths, atrophy_vecs, diagnoses, ptau_vals, rids = [], [], [], [], [], []
-    for cohort in ["AD", "MCI"]:
+    suvr_vecs = []
+    for cohort in ["AD", "MCI", "CN"]:
         cohort_dir = os.path.join(base_dir, "cerebellumNormalized_AD_MCI", cohort)
         if not os.path.exists(cohort_dir):
             print(f"Warning: {cohort_dir} not found, skipping")
@@ -366,15 +392,16 @@ def build_dataloaders(base_dir=BASE_DIR, batch_size=BATCH_SIZE, seed=SEED,
                 if use_tissue and not os.path.exists(
                         SpatialTauPETDataset._seg_path(rid_to_mri[rid])):
                     continue  # skip subjects without a tissue segmentation
-                if use_ptau and rid not in rid_to_ptau:
+                if (use_ptau or _require_ptau) and rid not in rid_to_ptau:
                     continue  # skip subjects without a plasma p-tau217 value
-                if use_suvr_map and rid not in rid_to_suvr:
+                if (use_suvr_map or use_both_maps) and rid not in rid_to_suvr:
                     continue  # SUVR-map mode: skip subjects without a regional SUVR row
                 pet_paths.append(pet)
                 mri_paths.append(rid_to_mri[rid])
                 # SUVR-map mode paints the spatial channel from regional SUVR; the
                 # atrophy_vecs slot carries that vector so the painter stays unchanged.
                 atrophy_vecs.append(rid_to_suvr[rid] if use_suvr_map else rid_to_atrophy[rid])
+                suvr_vecs.append(rid_to_suvr[rid] if use_both_maps else None)
                 diagnoses.append(rid_to_diag[rid])
                 ptau_vals.append(rid_to_ptau[rid] if use_ptau else None)
                 rids.append(rid)
@@ -393,6 +420,7 @@ def build_dataloaders(base_dir=BASE_DIR, batch_size=BATCH_SIZE, seed=SEED,
             atlas_data, inv_atlas_affine,
             use_dk_mask=use_dk_mask, use_tissue=use_tissue,
             cond_mode=cond_mode, ptau_vals=[ptau_vals[i] for i in idx_list],
+            suvr_vecs=([suvr_vecs[i] for i in idx_list] if use_both_maps else None),
         )
 
     if use_mentor_split:
@@ -405,8 +433,7 @@ def build_dataloaders(base_dir=BASE_DIR, batch_size=BATCH_SIZE, seed=SEED,
             val_frac_of_dev=val_frac_of_dev, test_dict=test_dict, dev_dict=dev_dict,
         )
         if no_val_split:
-            # Fold the val fold back into train → train on ALL dev; val empty.
-            # For the final fixed-epoch model (disable validation via huge --val-every).
+            # Fold val back into train -> train on ALL dev; val empty.
             train_idx = train_idx + val_idx
             val_idx = []
         train_ds = _make_ds(train_idx)

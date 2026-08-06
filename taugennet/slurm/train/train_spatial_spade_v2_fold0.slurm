@@ -11,14 +11,6 @@
 #SBATCH --output=results/logs/spatial_spade_v2_fold0_%j.out
 #SBATCH --error=results/logs/spatial_spade_v2_fold0_%j.err
 
-# CORRECTED full fold-0 run for spatial-injection Design A (SPADE), fixing all issues
-# found in the v1 run (jobs 885659/885074):
-#   - paper AE (latent_ch=3, n_res_blocks=2) instead of the wrong ae_lch8_dk86 (latent_ch=8)
-#   - --cond-mode ptau217 to match cfgm_5 exactly (spatial map + ptau217 cross-attention)
-#   - larger UNet (256,512,768 / n_transformer=3) matching c04, the sweep's current leader
-# Baseline to beat (CV-mean, NOT the inflated single-fold 0.510): cfgm_5 SET3=0.389/SET1=0.336;
-# best-arch c04 SET3=0.466/SET1=0.336. This is fold-0 only — 5-fold it if it looks promising.
-
 set -e
 
 PYTHON=/usr/bin/python3.9

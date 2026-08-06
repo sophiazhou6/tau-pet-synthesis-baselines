@@ -1,13 +1,20 @@
-# Data & checkpoints — never committed (ADNI Data Use Agreement; see CLAUDE.md)
+# Data & checkpoints — never committed (ADNI Data Use Agreement; see README.md)
 data/
 **/data/raw/
 results/checkpoints/
 results/figures/
 results/generated/
+results/logs/
+results/masks/
 *.pt
 *.pth
 *.nii
 *.nii.gz
+
+# In-place-edit backups left by the cluster patch scripts (~190 of them)
+*.bak
+*.bak_*
+*.pre*
 
 # Python
 __pycache__/

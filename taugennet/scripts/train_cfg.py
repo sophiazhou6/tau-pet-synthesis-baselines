@@ -33,7 +33,7 @@ from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 
 from src.config import (DEVICE, T_STEPS, LR, AE_EPOCHS, DIFF_EPOCHS, BATCH_SIZE,
-                        AE_CHECKPOINT_PATH, CHECKPOINT_DIR, FIGURES_DIR, LATENT_CH)
+                        AE_CHECKPOINT_PATH, CHECKPOINT_DIR, FIGURES_DIR, LATENT_CH, LATENT_SCALE)
 from src import dataset_final     as _dataset_final
 from src import dataset_combined as _dataset_combined
 from src.models       import Autoencoder3D, DenoisingUNet3D
@@ -139,7 +139,7 @@ def train_ae(ae, train_loader, n_epochs, ckpt_path, device,
                 best_val_loss = val_loss
                 best_epoch    = epoch + 1
                 epochs_no_improv = 0
-                torch.save({"ae": ae.state_dict(), "ae_losses": train_losses,
+                torch.save({"ae": ae.state_dict(), "ae_scale": getattr(ae,"scale",8), "ae_res_blocks": getattr(ae,"n_res_blocks",1), "ae_losses": train_losses,
                             "ae_val_losses": list(zip(val_epochs_list, val_losses_list)),
                             "epoch": epoch + 1}, best_ckpt_path)
             else:
@@ -155,7 +155,7 @@ def train_ae(ae, train_loader, n_epochs, ckpt_path, device,
             remaining = (time.time() - t0) * (n_epochs - epoch - 1)
             print(f"  AE {epoch+1:3d}/{n_epochs}  loss={avg:.4f}{val_str}  "
                   f"elapsed={elapsed/60:.1f}m  remaining={remaining/60:.1f}m", flush=True)
-            torch.save({"ae": ae.state_dict(), "ae_losses": train_losses,
+            torch.save({"ae": ae.state_dict(), "ae_scale": getattr(ae,"scale",8), "ae_res_blocks": getattr(ae,"n_res_blocks",1), "ae_losses": train_losses,
                         "ae_val_losses": list(zip(val_epochs_list, val_losses_list)),
                         "epoch": epoch + 1}, ckpt_path)
 
@@ -383,7 +383,7 @@ def train_diffusion(ae, unet, conditioner, schedule, latent_std,
 def _save_diff_ckpt(path, ae, unet, conditioner, latent_std, diff_losses, epoch,
                     diff_val_losses=None, cfg_prob=0.0):
     torch.save({
-        "ae":             ae.state_dict(),
+        "ae": ae.state_dict(), "ae_scale": getattr(ae,"scale",8), "ae_res_blocks": getattr(ae,"n_res_blocks",1), "latent_ch": getattr(ae,"latent_ch",LATENT_CH),
         "unet":           unet.state_dict(),
         "conditioner":    conditioner.state_dict(),
         "latent_std":     latent_std.cpu(),
@@ -429,7 +429,7 @@ def quick_eval(ae, unet, conditioner, schedule, latent_std, test_ds,
 
 def parse_args():
     p = argparse.ArgumentParser(description="Train TauGenNet")
-    p.add_argument("--mode",           choices=["ptau217", "ptau217_mlp", "atrophy", "combined"], required=True)
+    p.add_argument("--mode",           choices=["ptau217", "ptau217_mlp", "atrophy", "combined", "combined_mlp"], required=True)
     p.add_argument("--ae-epochs",      type=int,  default=AE_EPOCHS)
     p.add_argument("--diff-epochs",    type=int,  default=DIFF_EPOCHS)
     p.add_argument("--batch-size",     type=int,  default=BATCH_SIZE)
@@ -464,6 +464,14 @@ def parse_args():
                    help="Learning rate for diffusion AdamW optimizer (default 1e-4)")
     p.add_argument("--kl-weight",      type=float, default=1e-4,
                    help="KL divergence weight in AE loss (default 1e-4)")
+    p.add_argument("--use-controls-322", action="store_true", default=False,
+                   help="Train on the 322-subject CN+AD+MCI controls cohort "
+                        "instead of the AD/MCI mentor split.")
+    p.add_argument("--suvr-as-cond", action="store_true", default=False,
+                   help="Replace atrophy conditioning with regional SUVR values, "
+                        "through the same MLP/cross-attention path (mode must be atrophy).")
+    p.add_argument("--use-mentor-split", action=argparse.BooleanOptionalAction, default=True,
+                   help="Mentor fixed split (default on).")
     p.add_argument("--cfg-prob",       type=float, default=0.15,
                    help="Probability of zeroing conditioning during training (CFG dropout, default 0.15)")
     p.add_argument("--guidance-scale", type=float, default=3.0,
@@ -486,10 +494,12 @@ def main():
     if args.fold is not None:
         fold_kwargs = {"fold_idx": args.fold, "n_folds": args.n_folds}
 
-    if args.mode == "combined":
+    if args.mode in ("combined", "combined_mlp"):
         train_ds, val_ds, test_ds, train_loader, val_loader, _ = \
             _dataset_combined.build_dataloaders(
-                mode=args.mode, batch_size=args.batch_size, use_dk_mask=args.use_mask,
+                mode="combined", batch_size=args.batch_size, use_dk_mask=args.use_mask,
+                use_mentor_split=args.use_mentor_split,
+                use_controls_322=args.use_controls_322,
                 train_frac=train_frac, val_frac=val_frac, **fold_kwargs,
             )
     else:
@@ -498,12 +508,25 @@ def main():
         train_ds, val_ds, test_ds, train_loader, val_loader, _ = \
             _dataset_final.build_dataloaders(
                 mode=dataset_mode, batch_size=args.batch_size, use_dk_mask=args.use_mask,
+                use_mentor_split=args.use_mentor_split,
+                use_controls_322=args.use_controls_322,
+                suvr_as_cond=args.suvr_as_cond,
                 train_frac=train_frac, val_frac=val_frac, **fold_kwargs,
             )
     print(f"Mode: {args.mode}  |  train={len(train_ds)}  val={len(val_ds)}  test={len(test_ds)}")
 
     # ── Models ────────────────────────────────────────────────────────────────
-    ae          = Autoencoder3D().to(device)
+    # When reusing an AE, rebuild it at the checkpoint's architecture (paper AE = latent_ch 3,
+    # scale 8, 2 res-blocks/level). Bare Autoencoder3D() defaults to rb=1 and would fail to load it.
+    _ae_kw = {}
+    if (args.skip_ae or getattr(args, "eval_only", False)) and os.path.exists(args.ae_checkpoint):
+        _peek = torch.load(args.ae_checkpoint, map_location="cpu")
+        _ae_kw = {"latent_ch":   _peek.get("latent_ch", LATENT_CH),
+                  "scale":       _peek.get("ae_scale", LATENT_SCALE),
+                  "n_res_blocks": _peek.get("ae_res_blocks", 1)}
+        del _peek
+        print(f"AE arch from checkpoint: {_ae_kw}")
+    ae          = Autoencoder3D(**_ae_kw).to(device)
     print(f"AE params:   {sum(p.numel() for p in ae.parameters()):,}")
 
     # Only create UNet/conditioner/schedule if doing diffusion training
@@ -514,6 +537,7 @@ def main():
         unet_ch = tuple(int(x) for x in args.unet_channels.split(","))
         conditioner = build_conditioner(args.mode, device=device)
         unet        = DenoisingUNet3D(context_dim=conditioner.out_dim,
+                                      latent_ch=_ae_kw.get("latent_ch", LATENT_CH),
                                       ch_list=unet_ch,
                                       n_transformer=args.n_transformer).to(device)
         schedule    = DiffusionSchedule(device=device)

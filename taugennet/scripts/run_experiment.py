@@ -35,7 +35,7 @@ from pathlib import Path
 
 ROOT       = Path(__file__).parent.parent
 STATE_FILE = ROOT / "results" / "experiment_state.json"
-PYTHON     = os.environ.get("TAUGENNET_PYTHON", "/home/sz3962/.conda/envs/taugennet/bin/python3")
+PYTHON     = "/home/sz3962/.conda/envs/taugennet/bin/python3"
 
 STAGES = [
     "env_check",

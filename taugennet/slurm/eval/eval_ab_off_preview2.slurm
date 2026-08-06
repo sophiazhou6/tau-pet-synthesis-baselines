@@ -6,21 +6,22 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --gres=gpu:3g.20gb:1
+#SBATCH --gres=gpu:nvidia_h100_nvl:1
 #SBATCH --mem=32G
 #SBATCH --time=01:00:00
 #SBATCH --output=results/logs/eval_ab_off_prev2_%A_%a.out
 #SBATCH --error=results/logs/eval_ab_off_prev2_%A_%a.err
-#SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=sz3962@princeton.edu
 
 # PREVIEW (v2) eval of already-trained ab_emasnr_off folds 0-1, on a free g2 MIG
 # (3g.20gb) slice via the high-priority gpu-test QOS so the backfill scheduler
 # actually reaches it (NOT the A100 — inference fits easily in 20GB). Writes to
 # separate *_preview2 dirs; touches no queued job (3288407 left pending as-is).
 
-PYTHON=/home/sz3962/.conda/envs/taugennet/bin/python3
-cd /scratch/network/sz3962/taugennet
+PYTHON=/usr/bin/python3.9
+cd /home/remote/adebnath1/taugennet
+export PYTHONPATH="/home/remote/adebnath1/.local/lib/python3.9/site-packages:/home/remote/adebnath1/taugennet:$PYTHONPATH"
+export TAUGENNET_ROOT="/home/remote/adebnath1/taugennet"
+source scripts/wait_for_fac.sh
 FOLD=$SLURM_ARRAY_TASK_ID
 REC="results/records/eval/ab_emasnr_off_preview2/fold_${FOLD}"
 GEN="results/generated/ab_emasnr_off_preview2/fold_${FOLD}"

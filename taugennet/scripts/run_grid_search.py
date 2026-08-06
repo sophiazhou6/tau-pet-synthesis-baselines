@@ -49,12 +49,8 @@ import subprocess
 import sys
 import textwrap
 
-# Portable: override per-cluster via env vars; defaults reproduce the Princeton setup.
-PYTHON    = os.environ.get("TAUGENNET_PYTHON", "/home/sz3962/.conda/envs/taugennet/bin/python3")
-ROOT      = os.environ.get("TAUGENNET_ROOT", "/scratch/network/sz3962/taugennet")
-PARTITION = os.environ.get("TAUGENNET_PARTITION", "gpu")
-GRES      = os.environ.get("TAUGENNET_GRES", "gpu:nvidia_a100:1")
-MAIL_USER = os.environ.get("TAUGENNET_MAIL", "sz3962@princeton.edu")
+PYTHON    = "/home/sz3962/.conda/envs/taugennet/bin/python3"
+ROOT      = "/scratch/network/sz3962/taugennet"
 SLURM_DIR = os.path.join(ROOT, "slurm/grid_search")
 STATE_DIR = os.path.join(ROOT, "results/grid_search")
 STEP0_FINALISTS = os.path.join(STATE_DIR, "step0_finalists.json")
@@ -87,13 +83,13 @@ def _tag(lch, kl):
 def _slurm_header(job_name, array_n, log_prefix, walltime="12:00:00", gpu_constraint=None):
     # gpu_constraint (e.g. "gpu80|v100") lets cheap jobs run on the A100-80 OR the V100,
     # avoiding the 20GB MIG slice. Uses untyped gpu:1 so either GPU type matches.
-    gres  = "gpu:1" if gpu_constraint else GRES
+    gres  = "gpu:1" if gpu_constraint else "gpu:nvidia_a100:1"
     extra = f"\n        #SBATCH --constraint={gpu_constraint}" if gpu_constraint else ""
     return textwrap.dedent(f"""\
         #!/bin/bash
         #SBATCH --job-name={job_name}
         #SBATCH --array=0-{array_n - 1}
-        #SBATCH --partition={PARTITION}
+        #SBATCH --partition=gpu
         #SBATCH --nodes=1
         #SBATCH --ntasks=1
         #SBATCH --cpus-per-task=8
@@ -103,7 +99,7 @@ def _slurm_header(job_name, array_n, log_prefix, walltime="12:00:00", gpu_constr
         #SBATCH --output=results/logs/{log_prefix}_%A_%a.out
         #SBATCH --error=results/logs/{log_prefix}_%A_%a.err
         #SBATCH --mail-type=END,FAIL
-        #SBATCH --mail-user={MAIL_USER}
+        #SBATCH --mail-user=sz3962@princeton.edu
     """)
 
 

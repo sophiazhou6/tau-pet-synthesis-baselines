@@ -5,25 +5,26 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:nvidia_a100:1
+#SBATCH --gres=gpu:nvidia_h100_nvl:1
 #SBATCH --mem=64G
 #SBATCH --time=12:00:00
 #SBATCH --output=results/logs/taugennet_cv_%A_%a.out
 #SBATCH --error=results/logs/taugennet_cv_%A_%a.err
-#SBATCH --mail-type=BEGIN,END,FAIL
-#SBATCH --mail-user=sz3962@princeton.edu
 
 # 5-fold cross-validation — one array task per fold.
 # All 5 folds run in parallel; each trains AE + atrophy + ptau217 + combined.
 # Submit: sbatch slurm/train/train_cv.slurm
 # Or via orchestrator: python scripts/run_cv.py
 
-PYTHON=/home/sz3962/.conda/envs/taugennet/bin/python3
+PYTHON=/usr/bin/python3.9
 FOLD=$SLURM_ARRAY_TASK_ID
 N_FOLDS=5
 AE_CKPT=results/checkpoints/cv/fold_${FOLD}/taugennet_checkpoint.pt
 
-cd /scratch/network/sz3962/taugennet
+cd /home/remote/adebnath1/taugennet
+export PYTHONPATH="/home/remote/adebnath1/.local/lib/python3.9/site-packages:/home/remote/adebnath1/taugennet:$PYTHONPATH"
+export TAUGENNET_ROOT="/home/remote/adebnath1/taugennet"
+source scripts/wait_for_fac.sh
 
 mkdir -p results/logs \
          results/checkpoints/cv/fold_${FOLD}/atrophy \

@@ -5,16 +5,17 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --gres=gpu:nvidia_a100:1
+#SBATCH --gres=gpu:nvidia_h100_nvl:1
 #SBATCH --mem=32G
 #SBATCH --time=3:00:00
 #SBATCH --output=results/logs/eval_exp_d_%A_%a.out
 #SBATCH --error=results/logs/eval_exp_d_%A_%a.err
-#SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=sz3962@princeton.edu
 
-PYTHON=/home/sz3962/.conda/envs/taugennet/bin/python3
-cd /scratch/network/sz3962/taugennet
+PYTHON=/usr/bin/python3.9
+cd /home/remote/adebnath1/taugennet
+export PYTHONPATH="/home/remote/adebnath1/.local/lib/python3.9/site-packages:/home/remote/adebnath1/taugennet:$PYTHONPATH"
+export TAUGENNET_ROOT="/home/remote/adebnath1/taugennet"
+source scripts/wait_for_fac.sh
 FOLD=$SLURM_ARRAY_TASK_ID
 CKPT="results/checkpoints/lr_ablation/exp_d/fold_${FOLD}/diff_spatial_atrophy_best.pt"
 GEN="results/generated/lr_ablation/exp_d/fold_${FOLD}"

@@ -186,10 +186,70 @@ def _build_rid_to_ptau(fluid_csv):
     }
 
 
+def _build_controls_322_dataloaders_combined(base_dir, controls_dir, batch_size, seed,
+                                              use_dk_mask, train_frac, val_frac, fold_idx, n_folds):
+    """controls_322-aware loader for combined (atrophy+ptau217) mode -- mirrors
+    dataset_final.py's _build_controls_322_dataloaders, extended with ptau217 lookup
+    (the atrophy-only version there has no ptau217 support at all)."""
+    from . import dataset_final as _df
+    rid_to_mri = _df._build_rid_to_mri(base_dir, extra_cohorts=["1mm_parcellated_CN_subj"])
+    print(f"MRI subjects found (incl. CN): {len(rid_to_mri)}")
+    rid_to_atrophy = _build_rid_to_atrophy(base_dir)
+    print(f"Atrophy vectors loaded: {len(rid_to_atrophy)}")
+    rid_to_ptau = _build_rid_to_ptau(ADNI_FLUID_CSV)
+    print(f"p-tau217 values loaded: {len(rid_to_ptau)}")
+
+    test_dict, dev_dict = _df._load_controls_322_splits(controls_dir)
+    keep = keep_set(test_dict, dev_dict)
+    print(f"controls_322 split: {len(test_dict)} heldout_test + {len(dev_dict)} dev "
+          f"(subjects not in either file are dropped)")
+
+    pet_paths, mri_paths, cond_vals, rids = [], [], [], []
+    for cohort in ["AD", "MCI", "CN"]:
+        cohort_dir = os.path.join(base_dir, "cerebellumNormalized_AD_MCI", cohort)
+        if not os.path.exists(cohort_dir):
+            print(f"Warning: {cohort_dir} not found, skipping")
+            continue
+        for subj_dir in sorted(glob.glob(os.path.join(cohort_dir, "RID_*"))):
+            rid = os.path.basename(subj_dir).replace("RID_", "")
+            if rid not in keep:
+                continue
+            pet = os.path.join(subj_dir, "PET_MNISpace_SUVR_CerebellumNorm.nii")
+            if not os.path.exists(pet):
+                pet = pet + ".gz"
+            if (os.path.exists(pet) and rid in rid_to_mri
+                    and rid in rid_to_atrophy and rid in rid_to_ptau):
+                pet_paths.append(pet)
+                mri_paths.append(rid_to_mri[rid])
+                cond_vals.append(np.concatenate([rid_to_atrophy[rid], rid_to_ptau[rid]]))
+                rids.append(rid)
+
+    print(f"Matched subjects (controls_322, combined): {len(pet_paths)}")
+
+    def _make_ds(idx):
+        return TauPETDataset([pet_paths[i] for i in idx],
+                             [mri_paths[i] for i in idx],
+                             [cond_vals[i] for i in idx], use_dk_mask=use_dk_mask)
+
+    denom = train_frac + val_frac
+    val_frac_of_dev = (val_frac / denom) if denom else 0.2
+    train_idx, val_idx, test_idx = assign_indices(
+        rids, fold_idx=fold_idx, n_folds=n_folds, seed=seed,
+        val_frac_of_dev=val_frac_of_dev, test_dict=test_dict, dev_dict=dev_dict,
+    )
+    train_ds, val_ds, test_ds = _make_ds(train_idx), _make_ds(val_idx), _make_ds(test_idx)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
+    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
+    print(f"[controls_322] {len(train_ds)} train / {len(val_ds)} val / {len(test_ds)} test")
+    return train_ds, val_ds, test_ds, train_loader, val_loader, test_loader
+
+
 def build_dataloaders(mode: str = "combined", base_dir=BASE_DIR,
                       batch_size=BATCH_SIZE, seed=SEED, use_dk_mask=True,
                       train_frac=0.64, val_frac=0.16,
-                      fold_idx=None, n_folds=5, use_mentor_split=True):
+                      fold_idx=None, n_folds=5, use_mentor_split=True,
+                      use_controls_322=False, controls_dir=None):
     """
     mode      : must be 'combined'
     train_frac: fraction of subjects for training (default 0.64; 80% of 80%)
@@ -205,6 +265,15 @@ def build_dataloaders(mode: str = "combined", base_dir=BASE_DIR,
     cond      : (87,) = [atrophy z-scores (86) ‖ ptau217 (1)]
     Returns: train_ds, val_ds, test_ds, train_loader, val_loader, test_loader
     """
+    if mode == "combined_mlp":
+        mode = "combined"  # MLP conditioner reuses combined data
+
+    if use_controls_322:
+        if controls_dir is None:
+            controls_dir = os.path.join(base_dir, "controls_322")
+        return _build_controls_322_dataloaders_combined(
+            base_dir, controls_dir, batch_size, seed, use_dk_mask,
+            train_frac, val_frac, fold_idx, n_folds)
     if mode != "combined":
         raise ValueError(f"dataset_combined only supports mode='combined', got {mode!r}")
 

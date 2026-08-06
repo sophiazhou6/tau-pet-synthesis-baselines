@@ -58,7 +58,13 @@ def load_models(checkpoint_path, mode, device=DEVICE, arch='silu',
         from .models import Autoencoder3D as _AE, DenoisingUNet3D as _UNet
     ckpt        = torch.load(checkpoint_path, map_location=device)
     latent_ch   = ckpt.get("latent_ch", LATENT_CH)
-    ae          = _AE(latent_ch=latent_ch).to(device)
+    _ae_kw = {"latent_ch": latent_ch}
+    if arch not in ("relu", "spatial"):
+        if ckpt.get("ae_scale") is not None:
+            _ae_kw["scale"] = ckpt["ae_scale"]
+        if ckpt.get("ae_res_blocks") is not None:
+            _ae_kw["n_res_blocks"] = ckpt["ae_res_blocks"]
+    ae          = _AE(**_ae_kw).to(device)
     unet        = _UNet(latent_ch=latent_ch, ch_list=ch_list, n_transformer=n_transformer).to(device)
     conditioner = build_conditioner(mode, device=device)
 

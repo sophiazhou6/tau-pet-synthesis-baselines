@@ -52,7 +52,7 @@ sys.path.insert(0, os.path.join(ROOT, "scripts"))
 import evaluate_final as ef          # noqa: E402  (reuse canonical eval functions)
 from src import dataset_spatial as _dataset  # noqa: E402
 
-PYTHON_DEFAULT = os.environ.get("TAUGENNET_PYTHON", "/home/sz3962/.conda/envs/taugennet/bin/python3")
+PYTHON_DEFAULT = "/home/sz3962/.conda/envs/taugennet/bin/python3"
 GEN_SCRIPT     = os.path.join(ROOT, "scripts", "generate_spatial.py")
 
 # Metric keys as returned (in order) by compute_wholebrain_metrics.

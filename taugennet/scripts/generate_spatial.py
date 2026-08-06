@@ -59,6 +59,7 @@ def _ddpm_loop(ae, unet, conditioner, schedule, latent_std,
 
 def main():
     p = argparse.ArgumentParser()
+    p.add_argument('--eval-on', choices=['test','val'], default='test')
     p.add_argument("--checkpoint",    required=True,
                    help="Path to spatial diffusion checkpoint .pt")
     p.add_argument("--generated-dir", required=True,
@@ -76,6 +77,8 @@ def main():
     p.add_argument("--use-mentor-split", action=argparse.BooleanOptionalAction, default=True,
                    help="--no-use-mentor-split forces the legacy split; MUST match the split the "
                         "checkpoint was trained with, or the generated test set is wrong.")
+    p.add_argument("--use-controls-322", action="store_true",
+                   help="Use the 322-subject CN+AD+MCI controls_322 cohort + its 2-col split CSVs.")
     p.add_argument("--train-frac",    type=float, default=0.64)
     p.add_argument("--val-frac",      type=float, default=0.16)
     p.add_argument("--fold",          type=int, default=None,
@@ -101,7 +104,6 @@ def main():
 
     ckpt      = torch.load(args.checkpoint, map_location=device)
     latent_ch = ckpt.get("latent_ch", args.latent_ch)
-    ae_res_blocks = ckpt.get("ae_res_blocks", 1)
     ch_list   = tuple(int(x) for x in args.unet_channels.split(","))
     # Tissue + cond-mode: derive from the checkpoint so UNet/conditioner match.
     extra_cond_ch = ckpt.get("extra_cond_ch", 1)
@@ -112,10 +114,10 @@ def main():
     use_spade             = ckpt.get("use_spade", False)
     spade_hidden          = ckpt.get("spade_hidden", 64) or 64
     print(f"extra_cond_ch={extra_cond_ch}  use_tissue={use_tissue}  cond_mode={cond_mode}"
-          f"  use_atrophy_encoder={use_atrophy_encoder}  use_spade={use_spade}"
-          f"  ae_res_blocks={ae_res_blocks}")
+          f"  use_atrophy_encoder={use_atrophy_encoder}  use_spade={use_spade}")
 
-    ae          = Autoencoder3D(latent_ch=latent_ch, n_res_blocks=ae_res_blocks).to(device)
+    ae          = Autoencoder3D(latent_ch=latent_ch,
+                                n_res_blocks=ckpt.get("ae_res_blocks", 1)).to(device)
     unet        = DenoisingUNet3D(latent_ch=latent_ch, ch_list=ch_list,
                                   n_transformer=args.n_transformer,
                                   extra_cond_ch=extra_cond_ch,
@@ -125,6 +127,9 @@ def main():
                                   spade_hidden=spade_hidden).to(device)
     if cond_mode == "none":
         conditioner = NullConditioner().to(device)
+    elif cond_mode == "ptau217_mlp":
+        from src.conditioning import PTau217MLPConditioner
+        conditioner = PTau217MLPConditioner().to(device)
     elif cond_mode == "ptau217":
         conditioner = PTau217Conditioner(device=device)
     else:
@@ -150,12 +155,14 @@ def main():
           f"{' (from checkpoint)' if args.noise_schedule is None else ' (from --noise-schedule)'}")
 
     fold_kwargs = {} if args.fold is None else {"fold_idx": args.fold, "n_folds": args.n_folds}
-    _, _, test_ds, _, _, _ = _dataset.build_dataloaders(
+    _, _val_ds, test_ds, _, _, _ = _dataset.build_dataloaders(
         use_dk_mask=args.use_mask,
         train_frac=args.train_frac, val_frac=args.val_frac,
         use_tissue=use_tissue, cond_mode=cond_mode,
-        use_mentor_split=args.use_mentor_split, **fold_kwargs,
+        use_mentor_split=args.use_mentor_split,
+        use_controls_322=args.use_controls_322, **fold_kwargs,
     )
+    if args.eval_on == 'val': test_ds = _val_ds
     print(f"Test subjects: {len(test_ds)}")
 
     n_gen = len(test_ds) if args.max_subjects is None else min(len(test_ds), args.max_subjects)

@@ -4,21 +4,22 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:nvidia_a100:1
+#SBATCH --gres=gpu:nvidia_h100_nvl:1
 #SBATCH --mem=64G
 #SBATCH --time=0-08:00:00
 #SBATCH --output=results/logs/agg_cond_compare_%j.out
 #SBATCH --error=results/logs/agg_cond_compare_%j.err
-#SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=sz3962@princeton.edu
 
 # Generate (DDPM, 500 steps) for every cond_compare variant × fold on the shared fixed
 # test set, then pool per-subject in-DK86 metrics into a variant comparison table.
 # Reuses scripts/generate_spatial.py (generation) and evaluate_final.py (metrics).
 # Cached subject_NNN.npy are reused across re-runs; pass --regenerate to force.
 
-PYTHON=/home/sz3962/.conda/envs/taugennet/bin/python3
-cd /scratch/network/sz3962/taugennet
+PYTHON=/usr/bin/python3.9
+cd /home/remote/adebnath1/taugennet
+export PYTHONPATH="/home/remote/adebnath1/.local/lib/python3.9/site-packages:/home/remote/adebnath1/taugennet:$PYTHONPATH"
+export TAUGENNET_ROOT="/home/remote/adebnath1/taugennet"
+source scripts/wait_for_fac.sh
 mkdir -p results/logs
 
 echo "Job ID: $SLURM_JOB_ID  Node: $SLURM_NODELIST  Start: $(date)"

@@ -5,21 +5,22 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --gres=gpu:3g.20gb:1
+#SBATCH --gres=gpu:nvidia_h100_nvl:1
 #SBATCH --mem=32G
 #SBATCH --time=0-02:00:00
 #SBATCH --output=results/logs/eval_ab_off_prev_%A_%a.out
 #SBATCH --error=results/logs/eval_ab_off_prev_%A_%a.err
-#SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=sz3962@princeton.edu
 
 # PREVIEW eval of the already-trained ab_emasnr_off folds 0-1, run NOW on a free
 # g2 MIG (3g.20gb) slice to dodge the jammed A100 queue. Inference-only, ~20GB is
 # plenty. Writes to SEPARATE *_preview dirs so it does NOT touch or overwrite the
 # queued canonical eval_ab_off (3286770) — that job still runs later as planned.
 
-PYTHON=/home/sz3962/.conda/envs/taugennet/bin/python3
-cd /scratch/network/sz3962/taugennet
+PYTHON=/usr/bin/python3.9
+cd /home/remote/adebnath1/taugennet
+export PYTHONPATH="/home/remote/adebnath1/.local/lib/python3.9/site-packages:/home/remote/adebnath1/taugennet:$PYTHONPATH"
+export TAUGENNET_ROOT="/home/remote/adebnath1/taugennet"
+source scripts/wait_for_fac.sh
 FOLD=$SLURM_ARRAY_TASK_ID
 REC="results/records/eval/ab_emasnr_off_preview/fold_${FOLD}"
 GEN="results/generated/ab_emasnr_off_preview/fold_${FOLD}"

@@ -28,7 +28,8 @@ class Encoder3D(nn.Module):
     # channel progression: 1 → ch_mult[0] → ch_mult[1] → ch_mult[2] → latent_ch * 2
     # ch_mult=(64, 128, 128) matches paper's [64, 128, 128, 128] adapted to 3 levels
     # (was base_ch=32 with doubling: [32, 64, 128, 256])
-    def __init__(self, in_ch=1, ch_mult=(64, 128, 128), latent_ch=LATENT_CH, scale=LATENT_SCALE):
+    def __init__(self, in_ch=1, ch_mult=(64, 128, 128), latent_ch=LATENT_CH, scale=LATENT_SCALE,
+                 n_res_blocks=1):
         super().__init__()
         n_down = int(math.log2(scale))  # 3 for scale=8
         assert len(ch_mult) == n_down, f"ch_mult must have {n_down} entries for scale={scale}"
@@ -36,15 +37,20 @@ class Encoder3D(nn.Module):
         # Initial projection: 1 → ch_mult[0]
         layers = [nn.Conv3d(in_ch, ch_mult[0], 3, padding=1)]
 
-        # Downsampling stages: ResBlock at current channels, then stride-2 conv to next
+        # Downsampling stages: n_res_blocks ResBlocks at current channels, then stride-2 conv.
+        # n_res_blocks=1 reproduces the original per-stage layout (depth axis of the grid).
         for i in range(n_down):
             ch      = ch_mult[i]
             ch_next = ch_mult[i + 1] if i + 1 < n_down else ch  # last stage stays at ch_mult[-1]
-            layers += [ResBlock3D(ch), nn.Conv3d(ch, ch_next, 4, stride=2, padding=1)]
+            layers += [ResBlock3D(ch) for _ in range(n_res_blocks)]
+            layers += [nn.Conv3d(ch, ch_next, 4, stride=2, padding=1)]
 
-        # Final: ResBlock + GroupNorm + SiLU + 1×1 conv to latent mean/logvar
+        # Final (bottleneck) level: n_res_blocks ResBlocks + GroupNorm + SiLU + 1×1 conv to
+        # latent mean/logvar. Counting the bottleneck, the encoder has n_down+1 levels, each with
+        # n_res_blocks blocks -> n_res_blocks=2 gives the paper's "four levels, two residual blocks each".
         ch = ch_mult[-1]
-        layers += [ResBlock3D(ch), nn.GroupNorm(GROUPNORM_GROUPS, ch, eps=1e-6), nn.SiLU(),
+        layers += [ResBlock3D(ch) for _ in range(n_res_blocks)]
+        layers += [nn.GroupNorm(GROUPNORM_GROUPS, ch, eps=1e-6), nn.SiLU(),
                    nn.Conv3d(ch, latent_ch * 2, 1)]
         self.net = nn.Sequential(*layers)
 
@@ -57,19 +63,23 @@ class Encoder3D(nn.Module):
 class Decoder3D(nn.Module):
     # mirror of Encoder3D; channel progression: latent_ch → ch_mult_rev → 1
     # (was base_ch=32 with reverse-doubling starting from 256)
-    def __init__(self, latent_ch=LATENT_CH, ch_mult=(64, 128, 128), out_ch=1, scale=LATENT_SCALE):
+    def __init__(self, latent_ch=LATENT_CH, ch_mult=(64, 128, 128), out_ch=1, scale=LATENT_SCALE,
+                 n_res_blocks=1):
         super().__init__()
         n_up = int(math.log2(scale))  # 3
         ch_rev = list(reversed(ch_mult))  # (128, 128, 64)
 
-        # Input projection from latent to highest channel count
-        layers = [nn.Conv3d(latent_ch, ch_rev[0], 3, padding=1), ResBlock3D(ch_rev[0])]
+        # Input projection from latent to highest channel count (bottleneck level: n_res_blocks blocks)
+        layers = [nn.Conv3d(latent_ch, ch_rev[0], 3, padding=1)]
+        layers += [ResBlock3D(ch_rev[0]) for _ in range(n_res_blocks)]
 
-        # Upsampling stages: stride-2 ConvTranspose, then ResBlock
+        # Upsampling stages: stride-2 ConvTranspose, then n_res_blocks ResBlocks.
+        # n_res_blocks=1 reproduces the original per-stage layout (mirror of the encoder depth axis).
         for i in range(n_up):
             ch      = ch_rev[i]
             ch_next = ch_rev[i + 1] if i + 1 < n_up else ch_rev[-1]
-            layers += [nn.ConvTranspose3d(ch, ch_next, 4, stride=2, padding=1), ResBlock3D(ch_next)]
+            layers += [nn.ConvTranspose3d(ch, ch_next, 4, stride=2, padding=1)]
+            layers += [ResBlock3D(ch_next) for _ in range(n_res_blocks)]
 
         ch_final = ch_rev[-1]  # 64
         layers += [nn.GroupNorm(GROUPNORM_GROUPS, ch_final, eps=1e-6), nn.SiLU(),
@@ -87,11 +97,21 @@ class Autoencoder3D(nn.Module):
                     and inference so conditioning is stable across calls.
     """
 
-    def __init__(self, latent_ch=LATENT_CH):
+    def __init__(self, latent_ch=LATENT_CH, scale=LATENT_SCALE, n_res_blocks=1, ch_mult=None):
         super().__init__()
-        self.latent_ch = latent_ch
-        self.encoder = Encoder3D(latent_ch=latent_ch)
-        self.decoder = Decoder3D(latent_ch=latent_ch)
+        self.latent_ch    = latent_ch
+        self.scale        = scale         # latent spatial downsampling (grid: 4/8/16 -> finer/coarser latent)
+        self.n_res_blocks = n_res_blocks  # AE depth: resblocks per stage (grid: 1/2/3)
+        # Derive ch_mult to match `scale` if not given: 64, then 128 per extra downsampling stage
+        # (scale=8 -> (64,128,128), the original default). All entries are /32 for GroupNorm.
+        n_down = int(math.log2(scale))
+        if ch_mult is None:
+            ch_mult = tuple([64] + [128] * (n_down - 1))
+        self.ch_mult = ch_mult
+        self.encoder = Encoder3D(latent_ch=latent_ch, ch_mult=ch_mult, scale=scale,
+                                 n_res_blocks=n_res_blocks)
+        self.decoder = Decoder3D(latent_ch=latent_ch, ch_mult=ch_mult, scale=scale,
+                                 n_res_blocks=n_res_blocks)
 
     def encode(self, x):
         mean, logvar = self.encoder(x)

@@ -3,16 +3,17 @@
 #SBATCH --output=results/logs/ae_ablation_%A_%a.out
 #SBATCH --error=results/logs/ae_ablation_%A_%a.err
 #SBATCH --partition=gpu
-#SBATCH --gres=gpu:nvidia_a100:1
+#SBATCH --gres=gpu:nvidia_h100_nvl:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=24:00:00
-#SBATCH --mail-type=BEGIN,END,FAIL
-#SBATCH --mail-user=sz3962@princeton.edu
 #SBATCH --array=0-3
 
-PYTHON=/home/sz3962/.conda/envs/taugennet/bin/python3
-cd /scratch/network/sz3962/taugennet
+PYTHON=/usr/bin/python3.9
+cd /home/remote/adebnath1/taugennet
+export PYTHONPATH="/home/remote/adebnath1/.local/lib/python3.9/site-packages:/home/remote/adebnath1/taugennet:$PYTHONPATH"
+export TAUGENNET_ROOT="/home/remote/adebnath1/taugennet"
+source scripts/wait_for_fac.sh
 
 mkdir -p results/logs results/checkpoints/ae_exp_masked/{baseline,lp,modality,both} \
          results/figures/ae_exp_masked/{baseline,lp,modality,both}

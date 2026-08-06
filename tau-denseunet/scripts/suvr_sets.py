@@ -37,8 +37,8 @@ from denseunet.config import (  # noqa: E402
 from denseunet import figs  # noqa: E402
 from denseunet.masks import load_or_build_wholebrain_mask, inject_mask  # noqa: E402
 
-RECORDS_DIR = os.path.join(REPO_ROOT, "results", "records")
-FIGURES_DIR = os.path.join(REPO_ROOT, "results", "figures")
+RECORDS_DIR = os.path.join(REPO_ROOT, "results", "records", "denseunet_baseline")
+FIGURES_DIR = os.path.join(REPO_ROOT, "results", "figures", "denseunet_baseline")
 
 
 def _load_evaluate_final():
@@ -59,14 +59,23 @@ def main():
     p.add_argument("--n-folds", type=int, default=N_FOLDS)
     p.add_argument("--mask-mode", choices=["dk86", "wholebrain"], default="dk86")
     p.add_argument("--generated-dir", default=None)
+    p.add_argument("--out-tag", type=str, default=None,
+                   help="Isolate this run's records/figures under <run_tag>_<out-tag>/ instead of "
+                        "the default path (use when comparing conditioning variants).")
+    p.add_argument("--split", choices=["test", "val"], default="test",
+                   help="Score against the held-out test set (default) or the validation split.")
+    p.add_argument("--mentor-split-dir", type=str, default=None,
+                   help="Override directory to read heldout_test_split.csv/train_val_split.csv from, "
+                        "isolated from the shared data/raw/ root.")
     args = p.parse_args()
 
     run_tag = args.mode if args.mask_mode == "dk86" else f"{args.mode}_wholebrain"
+    out_run_tag = run_tag if not args.out_tag else f"{run_tag}_{args.out_tag}"
     fold_sub = "" if args.fold is None else f"fold_{args.fold}"
     gen_dir = args.generated_dir or os.path.join(GENERATED_DIR, run_tag, fold_sub)
-    out_dir = (os.path.join(RECORDS_DIR, f"cv_{run_tag}", fold_sub) if args.fold is not None
-               else os.path.join(RECORDS_DIR, f"single_{run_tag}"))
-    fig_dir = os.path.join(FIGURES_DIR, run_tag, fold_sub, "suvr")
+    out_dir = (os.path.join(RECORDS_DIR, f"cv_{out_run_tag}", fold_sub) if args.fold is not None
+               else os.path.join(RECORDS_DIR, f"single_{out_run_tag}"))
+    fig_dir = os.path.join(FIGURES_DIR, out_run_tag, fold_sub, "suvr")
     os.makedirs(out_dir, exist_ok=True)
     if not os.path.isdir(gen_dir) or not any(f.endswith(".npy") for f in os.listdir(gen_dir)):
         sys.exit(f"No cached predictions in {gen_dir}.")
@@ -75,9 +84,12 @@ def main():
     from src.dataset_final import unnormalize  # noqa: E402
 
     fold_kwargs = {} if args.fold is None else {"fold_idx": args.fold, "n_folds": args.n_folds}
-    train_ds, val_ds, test_ds, *_ = build_dataloaders(mode=args.mode, use_dk_mask=True, **fold_kwargs)
+    train_ds, val_ds, test_ds, *_ = build_dataloaders(mode=args.mode, use_dk_mask=True, val_frac=0.0,
+                                                        mentor_split_dir=args.mentor_split_dir, **fold_kwargs)
     if args.mask_mode == "wholebrain":
         inject_mask(load_or_build_wholebrain_mask(args.mode), train_ds, val_ds, test_ds)
+    if args.split == "val":
+        test_ds = val_ds
 
     mask = ef._dk86_mask(test_ds)          # (H,W,D) bool — DK86 atlas OR injected whole-brain
     bbox = ef._mask_bbox(mask)

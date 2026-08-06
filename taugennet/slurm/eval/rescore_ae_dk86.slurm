@@ -4,21 +4,22 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:nvidia_h100_nvl:1
 #SBATCH --constraint=gpu80|v100
 #SBATCH --mem=32G
 #SBATCH --time=0-02:00:00
 #SBATCH --output=results/logs/rescore_ae_dk86_%j.out
 #SBATCH --error=results/logs/rescore_ae_dk86_%j.err
-#SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=sz3962@princeton.edu
 
 # Re-score the existing latent_ch{4,8} × lp_weight ablation AEs (+ the lch8 baseline)
 # with the CORRECTED DK86-masked recon metric, on the held-out test split.
 # Each AE's latent_ch is read from its own checkpoint, so no --latent-ch needed.
 
-PYTHON=/home/sz3962/.conda/envs/taugennet/bin/python3
-cd /scratch/network/sz3962/taugennet
+PYTHON=/usr/bin/python3.9
+cd /home/remote/adebnath1/taugennet
+export PYTHONPATH="/home/remote/adebnath1/.local/lib/python3.9/site-packages:/home/remote/adebnath1/taugennet:$PYTHONPATH"
+export TAUGENNET_ROOT="/home/remote/adebnath1/taugennet"
+source scripts/wait_for_fac.sh
 OUT=results/records/ae_rescore_dk86
 mkdir -p "$OUT" results/logs
 

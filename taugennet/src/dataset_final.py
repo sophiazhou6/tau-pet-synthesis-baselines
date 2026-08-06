@@ -108,20 +108,30 @@ class TauPETDataset(Dataset):
     idx, which can then be passed to unnormalize() to recover SUVR values.
     """
 
-    def __init__(self, pet_paths, mri_paths, cond_values, use_dk_mask=True):
-        self.pet_paths   = pet_paths
-        self.mri_paths   = mri_paths
-        self.cond_values = cond_values  # list of np.ndarray or float
-        self.use_dk_mask = use_dk_mask
-        self._pet_norms  = {}           # idx -> (orig_min, orig_max), populated lazily
-        # Precompute a single global DK86 atlas mask at VOL_SHAPE resolution.
-        # All subjects are in MNI space, so one shared mask applies to all.
-        if use_dk_mask:
+    def __init__(self, pet_paths, mri_paths, cond_values, use_dk_mask=True, suvr_values=None):
+        self.pet_paths    = pet_paths
+        self.mri_paths    = mri_paths
+        self.cond_values  = cond_values  # list of np.ndarray or float
+        self.suvr_values  = suvr_values  # list of (86,) np.ndarray or None, parallel to cond_values
+        self.use_dk_mask  = use_dk_mask
+        self._pet_norms   = {}          # idx -> (orig_min, orig_max), populated lazily
+        self._dk_labels   = None
+        # Precompute a single global DK86 atlas mask (and, if painting SUVR, the raw integer
+        # label volume) at VOL_SHAPE resolution. All subjects are in MNI space, so one shared
+        # mask/label-volume applies to all — same assumption the existing mask already relies on.
+        if use_dk_mask or suvr_values is not None:
             atlas_data, _, _ = load_atlas(get_default_atlas_path())
-            binary = (atlas_data > 0).astype(np.float32)  # labels 1-86 → 1.0
-            mask_t = torch.from_numpy(binary).unsqueeze(0).unsqueeze(0)  # (1,1,aH,aW,aD)
-            self._dk_mask = F.interpolate(mask_t, size=VOL_SHAPE,
-                                          mode="nearest").squeeze(0)      # (1,H,W,D)
+            if use_dk_mask:
+                binary = (atlas_data > 0).astype(np.float32)  # labels 1-86 → 1.0
+                mask_t = torch.from_numpy(binary).unsqueeze(0).unsqueeze(0)  # (1,1,aH,aW,aD)
+                self._dk_mask = F.interpolate(mask_t, size=VOL_SHAPE,
+                                              mode="nearest").squeeze(0)      # (1,H,W,D)
+            else:
+                self._dk_mask = None
+            if suvr_values is not None:
+                lbl_t = torch.from_numpy(atlas_data.astype(np.float32)).unsqueeze(0).unsqueeze(0)
+                self._dk_labels = F.interpolate(lbl_t, size=VOL_SHAPE,
+                                                mode="nearest").squeeze(0).squeeze(0).long()  # (H,W,D)
         else:
             self._dk_mask = None
 
@@ -158,20 +168,53 @@ class TauPETDataset(Dataset):
         self._pet_norms[idx]  = (pet_min, pet_max)
         mri, _, _             = self._load(self.mri_paths[idx], mask=mask)
         cond = torch.tensor(self.cond_values[idx], dtype=torch.float32)
+
+        if self.suvr_values is not None and self.suvr_values[idx] is not None:
+            vec = torch.as_tensor(self.suvr_values[idx], dtype=torch.float32)  # (86,) or (K,86)
+            if vec.ndim == 1:
+                vec = vec.unsqueeze(0)                                         # -> (1,86)
+            labels = self._dk_labels                                          # (H,W,D)
+            fg = labels > 0
+            chans = []
+            for k in range(vec.shape[0]):
+                painted = torch.zeros_like(labels, dtype=torch.float32)
+                painted[fg] = vec[k][labels[fg] - 1]
+                chans.append(painted.unsqueeze(0))
+            mri = torch.cat([mri] + chans, dim=0)                              # (1+K,H,W,D)
         return pet, mri, cond
 
 
 # ── Loaders ───────────────────────────────────────────────────────────────────
 
-def _build_rid_to_mri(base_dir):
+def _build_rid_to_mri(base_dir, extra_cohorts=None):
     rid_to_mri = {}
-    for cohort in ["1mm_parcellated_AD_subj", "1mm_parcellated_MCI_subj"]:
+    cohorts = ["1mm_parcellated_AD_subj", "1mm_parcellated_MCI_subj"] + (extra_cohorts or [])
+    for cohort in cohorts:
         for subj_dir in sorted(glob.glob(os.path.join(base_dir, cohort, "*"))):
             rid = os.path.basename(subj_dir).split("_")[-1]
             mri = os.path.join(subj_dir, "T1_to_MNI_nonlin.nii.gz")
             if os.path.exists(mri):
                 rid_to_mri[rid] = mri
     return rid_to_mri
+
+
+def _build_rid_to_suvr(base_dir):
+    suvr_cols = [_ATLAS[i] for i in range(1, 87)]
+    df = pd.read_csv(os.path.join(base_dir, "regional_SUVR_cerebellumNormalizedGTScan1.csv"))
+    missing = [c for c in suvr_cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"Regional SUVR CSV missing columns: {missing}")
+    rid_to_suvr = {}
+    skipped = 0
+    for _, row in df.iterrows():
+        rid = str(int(row["RID"]))
+        vec = row[suvr_cols].values.astype(np.float32)
+        if np.all(np.isnan(vec)):
+            skipped += 1
+            continue
+        rid_to_suvr[rid] = vec
+    print(f"Regional SUVR vectors loaded: {len(rid_to_suvr)}  (skipped {skipped} all-NaN)")
+    return rid_to_suvr
 
 
 def _build_rid_to_atrophy(base_dir):
@@ -207,9 +250,109 @@ def _build_rid_to_ptau(fluid_csv):
     }
 
 
+def _load_controls_322_splits(controls_dir):
+    """2-col (RID,group) format: which FILE a RID is in IS the split (no 'split' column,
+    unlike load_mentor_splits' 3-col AD/MCI format). group: 1.0=CN, 2.0=MCI, 3.0=AD."""
+    dev_df = pd.read_csv(os.path.join(controls_dir, "train_val_split.csv"))
+    test_df = pd.read_csv(os.path.join(controls_dir, "heldout_test_split.csv"))
+    dev_dict = {str(int(r["RID"])): int(r["group"]) for _, r in dev_df.iterrows()}
+    test_dict = {str(int(r["RID"])): int(r["group"]) for _, r in test_df.iterrows()}
+    return test_dict, dev_dict
+
+
+def _build_controls_322_dataloaders(mode, base_dir, controls_dir, batch_size, seed,
+                                     use_dk_mask, train_frac, val_frac, fold_idx, n_folds,
+                                     suvr_input, suvr_as_cond):
+    assert not (suvr_input and suvr_as_cond), "suvr_input and suvr_as_cond are mutually exclusive"
+    if mode != "atrophy":
+        raise ValueError(f"controls_322 cohort currently only supports mode='atrophy', got {mode!r}")
+
+    rid_to_mri = _build_rid_to_mri(base_dir, extra_cohorts=["1mm_parcellated_CN_subj"])
+    print(f"MRI subjects found (incl. CN): {len(rid_to_mri)}")
+
+    rid_to_cond = _build_rid_to_atrophy(base_dir)
+    print(f"Atrophy vectors loaded: {len(rid_to_cond)}")
+
+    test_dict, dev_dict = _load_controls_322_splits(controls_dir)
+    keep = keep_set(test_dict, dev_dict)
+    print(f"controls_322 split: {len(test_dict)} heldout_test + {len(dev_dict)} dev "
+          f"(subjects not in either file are dropped)")
+
+    pet_paths, mri_paths, cond_vals, rids = [], [], [], []
+    for cohort in ["AD", "MCI", "CN"]:
+        cohort_dir = os.path.join(base_dir, "cerebellumNormalized_AD_MCI", cohort)
+        if not os.path.exists(cohort_dir):
+            print(f"Warning: {cohort_dir} not found, skipping")
+            continue
+        for subj_dir in sorted(glob.glob(os.path.join(cohort_dir, "RID_*"))):
+            rid = os.path.basename(subj_dir).replace("RID_", "")
+            if rid not in keep:
+                continue
+            pet = os.path.join(subj_dir, "PET_MNISpace_SUVR_CerebellumNorm.nii")
+            if not os.path.exists(pet):
+                pet = pet + ".gz"
+            if os.path.exists(pet) and rid in rid_to_mri and rid in rid_to_cond:
+                pet_paths.append(pet)
+                mri_paths.append(rid_to_mri[rid])
+                cond_vals.append(rid_to_cond[rid])
+                rids.append(rid)
+
+    print(f"Matched subjects (controls_322, {mode}): {len(pet_paths)}")
+
+    _paint = os.environ.get("TAUGENNET_PAINT", "suvr").lower()
+    if suvr_input and _paint == "atrophy":
+        # PET-independent: paint atrophy, no SUVR needed -> keep the full cohort
+        suvr_vals = list(cond_vals)
+        print(f"[paint=atrophy] channels = MRI + atrophy; full cohort ({len(pet_paths)})")
+    elif suvr_input or suvr_as_cond:
+        rid_to_suvr = _build_rid_to_suvr(controls_dir)
+        keep_idx = [i for i, rid in enumerate(rids) if rid in rid_to_suvr]
+        dropped = len(rids) - len(keep_idx)
+        if dropped:
+            print(f"Dropped {dropped} subjects with no regional SUVR row")
+        pet_paths = [pet_paths[i] for i in keep_idx]
+        mri_paths = [mri_paths[i] for i in keep_idx]
+        cond_vals = [cond_vals[i] for i in keep_idx]
+        rids      = [rids[i] for i in keep_idx]
+        if suvr_input:
+            if _paint == "both":
+                suvr_vals = [np.stack([cond_vals[i], rid_to_suvr[rids[i]]])
+                             for i in range(len(rids))]          # (2,86) per subject
+                print(f"[paint=both] channels = MRI + atrophy + SUVR ({len(rids)} subjects)")
+            else:
+                suvr_vals = [rid_to_suvr[rid] for rid in rids]
+        else:
+            suvr_vals = [None] * len(rids)
+            cond_vals = [rid_to_suvr[rid] for rid in rids]  # FiLM: SUVR replaces atrophy as cond
+    else:
+        suvr_vals = [None] * len(pet_paths)
+
+    def _make_ds(idx):
+        return TauPETDataset([pet_paths[i] for i in idx],
+                             [mri_paths[i] for i in idx],
+                             [cond_vals[i] for i in idx],
+                             use_dk_mask=use_dk_mask,
+                             suvr_values=[suvr_vals[i] for i in idx] if suvr_input else None)
+
+    denom = train_frac + val_frac
+    val_frac_of_dev = (val_frac / denom) if denom else 0.2
+    train_idx, val_idx, test_idx = assign_indices(
+        rids, fold_idx=fold_idx, n_folds=n_folds, seed=seed,
+        val_frac_of_dev=val_frac_of_dev, test_dict=test_dict, dev_dict=dev_dict,
+    )
+    train_ds, val_ds, test_ds = _make_ds(train_idx), _make_ds(val_idx), _make_ds(test_idx)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
+    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
+    print(f"[controls_322] {len(train_ds)} train / {len(val_ds)} val / {len(test_ds)} test")
+    return train_ds, val_ds, test_ds, train_loader, val_loader, test_loader
+
+
 def build_dataloaders(mode: str, base_dir=BASE_DIR, batch_size=BATCH_SIZE, seed=SEED,
                       use_dk_mask=True, train_frac=0.64, val_frac=0.16,
-                      fold_idx=None, n_folds=5, use_mentor_split=True):
+                      fold_idx=None, n_folds=5, use_mentor_split=True, suvr_input=False,
+                      suvr_as_cond=False, use_phase6_manifest=False, phase6_fold=0,
+                      use_controls_322=False, controls_dir=None, mentor_split_dir=None):
     """
     mode      : 'ptau217' or 'atrophy'
     train_frac: fraction of subjects for training (default 0.64; 80% of 80%)
@@ -224,6 +367,45 @@ def build_dataloaders(mode: str, base_dir=BASE_DIR, batch_size=BATCH_SIZE, seed=
                 dropped). If False, fall back to the legacy random fraction/fold split.
     Returns: train_ds, val_ds, test_ds, train_loader, val_loader, test_loader
     """
+    if use_controls_322:
+        if controls_dir is None:
+            controls_dir = os.path.join(base_dir, "controls_322")
+        return _build_controls_322_dataloaders(
+            mode, base_dir, controls_dir, batch_size, seed, use_dk_mask,
+            train_frac, val_frac, fold_idx, n_folds, suvr_input, suvr_as_cond)
+
+    if use_phase6_manifest:
+        manifest_path = os.path.join(
+            os.environ.get("TAUGENNET_ROOT", "/scratch/network/sz3962/taugennet"),
+            "results", "records", "phase6_manifest_v4.csv")
+        manifest = pd.read_csv(manifest_path)
+        manifest = manifest[manifest["fold"] == phase6_fold]
+        train_rows = manifest[manifest["split"].isin(["train", "val"])]
+        test_rows = manifest[manifest["split"] == "test"]
+        print(f"[phase6] cohort: {manifest['group'].value_counts().to_dict()}  "
+              f"(fold {phase6_fold}, single final split — train+val merged, no held-out val)")
+
+        def _phase6_ds(rows):
+            return TauPETDataset(
+                list(rows["pet"]), list(rows["mri"]),
+                [np.zeros(1, dtype=np.float32)] * len(rows),  # cond unused: diagnosis not a model input
+                use_dk_mask=use_dk_mask)
+
+        train_ds = _phase6_ds(train_rows)
+        val_ds = _phase6_ds(test_rows.iloc[0:0])   # empty — no held-out val, matches no-early-stopping path
+        test_ds = _phase6_ds(test_rows)
+        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
+                                  num_workers=2, pin_memory=True)
+        val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False,
+                                num_workers=2, pin_memory=True)
+        test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False,
+                                 num_workers=2, pin_memory=True)
+        print(f"[phase6 fold {phase6_fold}] {len(train_ds)} train / {len(val_ds)} val / {len(test_ds)} test")
+        return train_ds, val_ds, test_ds, train_loader, val_loader, test_loader
+
+    assert not (suvr_input and suvr_as_cond), "suvr_input and suvr_as_cond are mutually exclusive"
+    if mode == "ptau217_mlp":
+        mode = "ptau217"  # MLP conditioner reuses ptau217 data
     if mode not in ("ptau217", "atrophy"):
         raise ValueError(f"mode must be 'ptau217' or 'atrophy', got {mode!r}")
 
@@ -240,10 +422,11 @@ def build_dataloaders(mode: str, base_dir=BASE_DIR, batch_size=BATCH_SIZE, seed=
     # Mentor's fixed split (Anil): test = heldout_test_split.csv, CV pool =
     # train_val_split.csv. Subjects in neither file are dropped (`keep`).
     if use_mentor_split:
-        test_dict, dev_dict = load_mentor_splits(base_dir)
+        test_dict, dev_dict = load_mentor_splits(mentor_split_dir or base_dir)
         keep = keep_set(test_dict, dev_dict)
         print(f"Mentor split: {len(test_dict)} heldout_test + {len(dev_dict)} dev "
-              f"(local-only subjects not in either file are dropped)")
+              f"(local-only subjects not in either file are dropped)"
+              + (f"  [split source: {mentor_split_dir}]" if mentor_split_dir else ""))
     else:
         test_dict = dev_dict = keep = None
 
@@ -268,12 +451,39 @@ def build_dataloaders(mode: str, base_dir=BASE_DIR, batch_size=BATCH_SIZE, seed=
 
     print(f"Matched subjects ({mode}): {len(pet_paths)}")
 
+    if suvr_input:
+        rid_to_suvr = _build_rid_to_suvr(base_dir)
+        keep_idx = [i for i, rid in enumerate(rids) if rid in rid_to_suvr]
+        dropped = len(rids) - len(keep_idx)
+        if dropped:
+            print(f"Dropped {dropped} subjects with no regional SUVR row")
+        pet_paths = [pet_paths[i] for i in keep_idx]
+        mri_paths = [mri_paths[i] for i in keep_idx]
+        cond_vals = [cond_vals[i] for i in keep_idx]
+        rids      = [rids[i] for i in keep_idx]
+        suvr_vals = [rid_to_suvr[rid] for rid in rids]
+    else:
+        suvr_vals = [None] * len(pet_paths)
+
+    if suvr_as_cond:
+        rid_to_suvr = _build_rid_to_suvr(base_dir)
+        keep_idx = [i for i, rid in enumerate(rids) if rid in rid_to_suvr]
+        dropped = len(rids) - len(keep_idx)
+        if dropped:
+            print(f"Dropped {dropped} subjects with no regional SUVR row (FiLM cond)")
+        pet_paths = [pet_paths[i] for i in keep_idx]
+        mri_paths = [mri_paths[i] for i in keep_idx]
+        rids      = [rids[i] for i in keep_idx]
+        cond_vals = [rid_to_suvr[rid] for rid in rids]  # SUVR replaces atrophy/ptau as the cond vector
+
     n = len(pet_paths)
 
     def _make_ds(idx):
         return TauPETDataset([pet_paths[i] for i in idx],
                              [mri_paths[i] for i in idx],
-                             [cond_vals[i] for i in idx], use_dk_mask=use_dk_mask)
+                             [cond_vals[i] for i in idx],
+                             use_dk_mask=use_dk_mask,
+                             suvr_values=[suvr_vals[i] for i in idx] if suvr_input else None)
 
     if use_mentor_split:
         # Fixed test = the 47 heldout RIDs; stratified 5-fold CV over the 188 dev RIDs.
