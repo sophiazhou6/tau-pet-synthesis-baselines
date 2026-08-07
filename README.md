@@ -12,7 +12,7 @@ model in its own right.
 | Folder | What it is |
 |---|---|
 | [`taugennet/`](taugennet/) | A 3D **latent diffusion** model — MRI-conditioned DDPM, **500 sampling steps** (not DDIM), input volumes **96×112×96**. Follows Gong et al., ["TauGenNet: Plasma-Driven Tau PET Image Synthesis via Text-Guided 3D Diffusion Models"](https://arxiv.org/abs/2509.04269) (IEEE TRPMS), extended here with a spatial-map conditioning path, a learned atrophy encoder, and an architecture sweep. |
-| [`tau-denseunet/`](tau-denseunet/) | A **deterministic 3D Dense-U-Net** doing direct MRI→tau-PET regression — a PyTorch port of [Neurology-AI-Program/AI_imputed_tau_PET](https://github.com/Neurology-AI-Program/AI_imputed_tau_PET) (Kolařík et al. 2019). |
+| [`tau-denseunet/`](tau-denseunet/) | A **deterministic 3D Dense-U-Net** doing direct MRI→tau-PET regression — a PyTorch port of [Neurology-AI-Program/AI_imputed_tau_PET](https://github.com/Neurology-AI-Program/AI_imputed_tau_PET), the code accompanying Lee et al., ["Synthesizing images of tau pathology from cross-modal neuroimaging using deep learning"](https://pubmed.ncbi.nlm.nih.gov/37804318/), *Brain* 147(3):980–995, 2024 ([doi:10.1093/brain/awad346](https://doi.org/10.1093/brain/awad346)). |
 
 **The two models are coupled, deliberately.** DenseUNet has no dataset layer of its own: it
 imports TauGenNet's `src.dataset_final` via `sys.path` and reads the same `TAUGENNET_PAINT`

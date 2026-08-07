@@ -8,8 +8,12 @@ as the TauGenNet diffusion model so the two can be compared head-to-head.
 
 This is a faithful port of the model in
 [Neurology-AI-Program/AI_imputed_tau_PET](https://github.com/Neurology-AI-Program/AI_imputed_tau_PET)
-(`tau_synthesis_train.py:get_unet`), originally the 3D Dense-U-Net of
-Kolařík et al. (2019). The upstream repo is TensorFlow/Keras and performs
+(`tau_synthesis_train.py:get_unet`) — the code accompanying Lee et al.,
+["Synthesizing images of tau pathology from cross-modal neuroimaging using deep
+learning"](https://pubmed.ncbi.nlm.nih.gov/37804318/), *Brain* 147(3):980–995, 2024
+([doi:10.1093/brain/awad346](https://doi.org/10.1093/brain/awad346)). The
+Dense-U-Net backbone itself originates with Kolařík et al. The upstream repo is
+TensorFlow/Keras and performs
 **FDG PET → tau PET** regression at 128³, reading pre-baked HDF5 `.mat` volumes.
 
 This port differs deliberately:
