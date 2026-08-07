@@ -14,9 +14,9 @@ plasma p-tau217 biomarker injected as text guidance.
 This project extends it beyond a literal port: it adds an alternative conditioning path
 (regional atrophy z-scores, both as an MLP vector and painted as a spatial map), an
 architecture/hyperparameter sweep (latent channels, model width, noise schedule), 5-fold CV,
-and DK86-masked regional evaluation not present in the original paper. See
-[`CLAUDE.md`](CLAUDE.md) for the full experiment surface (grid search, ablations, conditioning
-variants).
+and DK86-masked regional evaluation not present in the original paper. The root
+[README.md](../README.md) lists what each script does; `slurm/` holds the corresponding job
+scripts for grid search, ablations, and conditioning variants.
 
 - **Input resolution:** 96×112×96
 - **Sampler:** DDPM (500 steps), not DDIM
@@ -33,5 +33,5 @@ slurm/     SLURM batch scripts (training, evaluation, grid search, ablations)
 
 ## Usage
 
-See the root [README.md](../README.md) Quickstart section, and
-[`CLAUDE.md`](CLAUDE.md) for the full pipeline and cluster-specific notes.
+See the root [README.md](../README.md) — Quickstart, plus a per-file description of everything
+in `src/`, `scripts/`, and `slurm/`.
