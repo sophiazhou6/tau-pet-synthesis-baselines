@@ -1,17 +1,16 @@
 #!/bin/bash
 #SBATCH --job-name=denseunet_cv
 #SBATCH --partition=gpu
+#SBATCH --exclude=ggpu1-[06-18]
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:nvidia_a100:1
+#SBATCH --gres=gpu:1
 #SBATCH --mem=64G
 #SBATCH --time=03:00:00
 #SBATCH --array=0-4
-#SBATCH --output=/scratch/network/sz3962/tau-denseunet-baseline/results/logs/denseunet_%A_%a.out
-#SBATCH --error=/scratch/network/sz3962/tau-denseunet-baseline/results/logs/denseunet_%A_%a.err
-#SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=sz3962@princeton.edu
+#SBATCH --output=/home/remote/adebnath1/tau-denseunet-baseline/results/logs/denseunet_%A_%a.out
+#SBATCH --error=/home/remote/adebnath1/tau-denseunet-baseline/results/logs/denseunet_%A_%a.err
 
 # 5-fold CV for the Dense-U-Net baseline — one SLURM array task per fold.
 # Per-fold pipeline (no inter-step delay):
@@ -28,7 +27,7 @@
 #         sbatch slurm/train_generate.slurm atrophy wholebrain   # whole-brain (T1-seg) mask
 #
 # Aggregate after all 5 folds:
-#   python /scratch/network/sz3962/taugennet/scripts/aggregate_cv_eval.py results/records/cv_<run_tag>
+#   python /home/remote/adebnath1/taugennet/scripts/aggregate_cv_eval.py results/records/cv_<run_tag>
 #   python scripts/aggregate_suvr_sets.py --mode <mode> --mask-mode <MASK>
 set -euo pipefail
 
@@ -36,11 +35,13 @@ MODE="${1:-atrophy}"
 MASK="${2:-dk86}"                       # dk86 | wholebrain
 FOLD="${SLURM_ARRAY_TASK_ID:-0}"
 RUN_TAG="$MODE"; [ "$MASK" = "wholebrain" ] && RUN_TAG="${MODE}_wholebrain"
-PYTHON=/home/sz3962/.conda/envs/taugennet/bin/python3
-REPO=/scratch/network/sz3962/tau-denseunet-baseline
-export TAUGENNET_ROOT=/scratch/network/sz3962/taugennet
+PYTHON=/usr/bin/python3.9
+REPO=/home/remote/adebnath1/tau-denseunet-baseline
+export TAUGENNET_ROOT=/home/remote/adebnath1/taugennet
 
 cd "$REPO"
+source $HOME/taugennet/scripts/wait_for_fac.sh
+export PYTHONPATH="$HOME/.local/lib/python3.9/site-packages:/home/remote/adebnath1/tau-denseunet-baseline:$HOME/taugennet:${PYTHONPATH:-}"
 mkdir -p results/logs "results/checkpoints/$RUN_TAG/fold_$FOLD" \
          "results/generated/$RUN_TAG/fold_$FOLD" "results/records/cv_$RUN_TAG/fold_$FOLD"
 

@@ -1,0 +1,15 @@
+Loading atlas from /home/remote/adebnath1/taugennet/data/raw/mni_dk_atlas.nii.gz …
+Atlas loaded — shape (97, 115, 97), regions: 86 labels
+Note: 620 duplicate RIDs in atrophy CSV — keeping latest
+Skipped 96 all-NaN atrophy rows
+MRI subjects: 336  |  Atrophy subjects: 888  |  SUVR subjects: 533
+[spatial map = SUVR] painting regional tau-SUVR into the spatial channel (atrophy z-scores NOT used for the map)
+controls_322 split: 65 heldout_test + 256 dev (subjects not in either file are dropped)
+Matched subjects (spatial, cond=none): 317
+[mentor split] fold 0/5: 202 train / 51 val / 64 test (dev pool present: 253)
+val n=51  first RIDs: ['6303', '6549', '6601', '6708', '6828']
+matched 51 subjects x 86 regions
+
+PER-REGION cross-subject r: median 0.870  mean 0.826  min -0.526  max 0.962
+POOLED r: 0.841
+VERDICT: SEVERE overlap

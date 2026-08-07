@@ -508,7 +508,7 @@ def parse_args():
                    help="Hidden channel width for each SPADE layer's shared conv "
                         "(only used with --use-spade).")
     p.add_argument("--cond-mode",      type=str, default="atrophy",
-                   choices=["atrophy", "none", "ptau217"],
+                   choices=["atrophy", "none", "ptau217", "ptau217_mlp"],
                    help="Cross-attention conditioner alongside the spatial atrophy map: "
                         "'atrophy' = atrophy MLP (default); 'none' = learned-null context "
                         "(spatial map only); 'ptau217' = frozen CLIP on plasma p-tau217.")

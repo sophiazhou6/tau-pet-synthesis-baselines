@@ -167,10 +167,10 @@ held-out-TEST variants, only the three CSVs behind the published tables
 artifact in this repository.** Every number in [RESULTS.md](RESULTS.md) is recomputable from
 them; nothing there is transcribed by hand.
 
-**One script is permanently lost.** `make_per_subject_taugennet.py`, which generated the
-TauGenNet per-subject metric CSVs, was destroyed by a mangled heredoc and is not recoverable.
-Its *outputs* survive in the archive; the script does not. The DenseUNet-side equivalent
-(`make_per_subject.py`) does survive and is committed under `analysis/`.
+The `analysis/` directory collects figure and rescoring scripts that produced published numbers
+but had been living loose in a cluster home directory, outside version control, until this
+commit. `make_per_subject_taugennet.py` had been recorded as destroyed by a mangled heredoc and
+unrecoverable; it turned out to be intact on the cluster and is committed here.
 
 ## Repository layout
 

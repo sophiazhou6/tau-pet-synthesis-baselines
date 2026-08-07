@@ -36,10 +36,11 @@ class DenseUNet3D(nn.Module):
     The lab volume shape (96, 112, 96) satisfies this (96/16=6, 112/16=7).
     """
 
-    def __init__(self, in_ch: int = 1, out_ch: int = 1):
+    def __init__(self, in_ch: int = 1, out_ch: int = 1, film_cond_dim: int = 0):
         super().__init__()
         self.relu = nn.ReLU(inplace=True)
         self.pool = nn.MaxPool3d(2)
+        self.film_cond_dim = film_cond_dim
 
         c0 = in_ch
         # ── Encoder ───────────────────────────────────────────────────────────
@@ -62,6 +63,11 @@ class DenseUNet3D(nn.Module):
         self.conv51 = _conv(p4, 512)                # → 512
         self.conv52 = _conv(p4 + 512, 512)          # conc51=p4+512 → 512
         c52 = p4 + 512                              # conc52 = cat(pool4, conv52)
+
+        if film_cond_dim > 0:
+            self.film = nn.Sequential(
+                nn.Linear(film_cond_dim, 128), nn.ReLU(inplace=True), nn.Linear(128, 2 * c52)
+            )
 
         # ── Decoder ───────────────────────────────────────────────────────────
         self.up6 = nn.ConvTranspose3d(c52, 256, kernel_size=2, stride=2)
@@ -90,7 +96,7 @@ class DenseUNet3D(nn.Module):
 
         self.out = nn.Conv3d(c92, out_ch, kernel_size=1)  # linear output
 
-    def forward(self, x):
+    def forward(self, x, cond=None):
         r = self.relu
         inp = x
 
@@ -122,6 +128,14 @@ class DenseUNet3D(nn.Module):
         conc51 = torch.cat([pool4, conv51], dim=1)
         conv52 = r(self.conv52(conc51))
         conc52 = torch.cat([pool4, conv52], dim=1)
+
+        if self.film_cond_dim > 0:
+            assert cond is not None, "film_cond_dim > 0 requires a cond tensor at forward()"
+            gamma_beta = self.film(cond)                     # (N, 2*c52)
+            gamma, beta = gamma_beta.chunk(2, dim=1)
+            gamma = gamma.view(*gamma.shape, 1, 1, 1)
+            beta  = beta.view(*beta.shape, 1, 1, 1)
+            conc52 = conc52 * (1 + gamma) + beta              # identity transform at init
 
         up6 = torch.cat([self.up6(conc52), conc42], dim=1)
         conv61 = r(self.conv61(up6))

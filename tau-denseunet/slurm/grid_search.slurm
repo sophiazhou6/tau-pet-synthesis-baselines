@@ -1,17 +1,16 @@
 #!/bin/bash
 #SBATCH --job-name=denseunet_grid
 #SBATCH --partition=gpu
+#SBATCH --exclude=ggpu1-[06-18]
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:nvidia_a100:1
+#SBATCH --gres=gpu:1
 #SBATCH --mem=64G
-#SBATCH --time=01:30:00
+#SBATCH --time=03:00:00
 #SBATCH --array=0-29
-#SBATCH --output=/scratch/network/sz3962/tau-denseunet-baseline/results/logs/grid_%A_%a.out
-#SBATCH --error=/scratch/network/sz3962/tau-denseunet-baseline/results/logs/grid_%A_%a.err
-#SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=sz3962@princeton.edu
+#SBATCH --output=/home/remote/adebnath1/tau-denseunet-baseline/results/logs/grid_%A_%a.out
+#SBATCH --error=/home/remote/adebnath1/tau-denseunet-baseline/results/logs/grid_%A_%a.err
 
 # Hyperparameter grid search across ALL 5 folds (cross-validated selection).
 # Grid = lr {5e-5, 1e-4, 3e-4} x weight_decay {0, 1e-4} = 6 configs x 5 folds = 30 tasks.
@@ -30,10 +29,12 @@ MODE="${1:-atrophy}"
 MASK="${2:-dk86}"
 EPOCHS=126                   # median best-epoch across the 5 DK86 folds (47,48,126,135,152)
 
-PYTHON=/home/sz3962/.conda/envs/taugennet/bin/python3
-REPO=/scratch/network/sz3962/tau-denseunet-baseline
-export TAUGENNET_ROOT=/scratch/network/sz3962/taugennet
+PYTHON=/usr/bin/python3.9
+REPO=/home/remote/adebnath1/tau-denseunet-baseline
+export TAUGENNET_ROOT=/home/remote/adebnath1/taugennet
 cd "$REPO"
+source $HOME/taugennet/scripts/wait_for_fac.sh
+export PYTHONPATH="$HOME/.local/lib/python3.9/site-packages:/home/remote/adebnath1/tau-denseunet-baseline:$HOME/taugennet:${PYTHONPATH:-}"
 
 # --- grid definition (6 configs) ---
 LRS=(5e-5 5e-5 1e-4 1e-4 3e-4 3e-4)

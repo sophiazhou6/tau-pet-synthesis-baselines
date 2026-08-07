@@ -11,10 +11,12 @@ results/masks/
 *.nii
 *.nii.gz
 
-# In-place-edit backups left by the cluster patch scripts (~190 of them)
-*.bak
-*.bak_*
+# In-place-edit backups left by the cluster patch scripts (~190 of them).
+# Note the glob: variants include .bak, .bak_controls322, .bak2, .presuvr — match them all.
+*.bak*
 *.pre*
+*.orig
+*~
 
 # Python
 __pycache__/
