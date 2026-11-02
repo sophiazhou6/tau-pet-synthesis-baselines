@@ -24,7 +24,7 @@ from torch.utils.data import Dataset, DataLoader
 import pandas as pd
 
 from .config import BASE_DIR, VOL_SHAPE, BATCH_SIZE, ADNI_FLUID_CSV, SEED
-from .atlas_labels import load_atlas, get_default_atlas_path
+from .atlas_labels import load_atlas, get_default_atlas_path, load_atlas_on_scan_grid
 from .splits import load_mentor_splits, assign_indices, keep_set
 
 # ── FreeSurfer atlas ID → column name prefix ──────────────────────────────────
@@ -93,7 +93,7 @@ class TauPETDataset(Dataset):
         self.cond_values = cond_values
         self.use_dk_mask = use_dk_mask
         if use_dk_mask:
-            atlas_data, _, _ = load_atlas(get_default_atlas_path())
+            atlas_data = load_atlas_on_scan_grid()
             binary = (atlas_data > 0).astype(np.float32)
             mask_t = torch.from_numpy(binary).unsqueeze(0).unsqueeze(0)
             self._dk_mask = F.interpolate(mask_t, size=VOL_SHAPE,

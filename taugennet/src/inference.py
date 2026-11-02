@@ -124,11 +124,11 @@ def synthesize_tau_pet(mri_vol, cond_data, ae, unet, schedule, encode_cond,
         c      = encode_cond(cond_b)
         zt     = torch.randn_like(zm)
         for i, t_idx in enumerate(tqdm(ts, desc=f"Denoising [{start}:{start+len(mri_b)}]", leave=False)):
+            t_prev = ts[i + 1] if i + 1 < len(ts) else -1
             if sampler == 'ddim':
-                t_prev = ts[i + 1] if i + 1 < len(ts) else -1
                 zt = schedule.ddim_sample(unet, zt, t_idx, t_prev, zm, c)
-            else:
-                zt = schedule.p_sample(unet, zt, t_idx, zm, c)
+            else:   # respaced DDPM: valid for n_steps < T_STEPS (p_sample assumed t → t−1)
+                zt = schedule.p_sample_respaced(unet, zt, t_idx, t_prev, zm, c)
         out_chunks.append(ae.decode(zt * latent_std).cpu())
 
     return torch.cat(out_chunks, dim=0)

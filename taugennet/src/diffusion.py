@@ -93,6 +93,25 @@ class DiffusionSchedule:
         return mean + self.post_var[t_idx].sqrt() * torch.randn_like(zt)
 
     @torch.no_grad()
+    def p_sample_respaced(self, model, zt, t_idx, t_prev_idx, zm, ctx):
+        """DDPM ancestral step from t to the previous step t_prev of a respaced sequence
+        (Nichol & Dhariwal 2021, §4): the posterior q(z_prev | z_t, z0_hat) with
+        β' = 1 − ā_t / ā_prev. Identical to p_sample when t_prev = t − 1; t_prev_idx = −1 means
+        ā_prev = 1 (the final step returns z0_hat)."""
+        t_batch = torch.full((zt.shape[0],), t_idx, device=self.device, dtype=torch.long)
+        eps_hat = model(torch.cat([zt, zm], dim=1), t_batch, ctx)
+        ab_t    = self.alpha_bar[t_idx]
+        ab_prev = self.alpha_bar[t_prev_idx] if t_prev_idx >= 0 else torch.ones((), device=ab_t.device)
+        beta    = 1 - ab_t / ab_prev
+        z0_hat  = (zt - (1 - ab_t).sqrt() * eps_hat) / ab_t.sqrt()
+        mean    = (ab_prev.sqrt() * beta / (1 - ab_t)) * z0_hat \
+            + ((1 - beta).sqrt() * (1 - ab_prev) / (1 - ab_t)) * zt
+        if t_prev_idx < 0:
+            return mean
+        var = (beta * (1 - ab_prev) / (1 - ab_t)).clamp(min=1e-20)
+        return mean + var.sqrt() * torch.randn_like(zt)
+
+    @torch.no_grad()
     def ddim_sample(self, model, zt, t_idx, t_prev_idx, zm, ctx):
         """One DDIM reverse step — correct for any step size (Song et al. 2020).
 

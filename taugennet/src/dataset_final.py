@@ -36,7 +36,7 @@ from torch.utils.data import Dataset, DataLoader
 import pandas as pd
 
 from .config import BASE_DIR, VOL_SHAPE, BATCH_SIZE, ADNI_FLUID_CSV, SEED
-from .atlas_labels import load_atlas, get_default_atlas_path
+from .atlas_labels import load_atlas, get_default_atlas_path, load_atlas_on_scan_grid
 from .splits import load_mentor_splits, assign_indices, keep_set
 
 # ── FreeSurfer atlas ID → column name prefix ──────────────────────────────────
@@ -120,7 +120,7 @@ class TauPETDataset(Dataset):
         # label volume) at VOL_SHAPE resolution. All subjects are in MNI space, so one shared
         # mask/label-volume applies to all — same assumption the existing mask already relies on.
         if use_dk_mask or suvr_values is not None:
-            atlas_data, _, _ = load_atlas(get_default_atlas_path())
+            atlas_data = load_atlas_on_scan_grid()
             if use_dk_mask:
                 binary = (atlas_data > 0).astype(np.float32)  # labels 1-86 → 1.0
                 mask_t = torch.from_numpy(binary).unsqueeze(0).unsqueeze(0)  # (1,1,aH,aW,aD)
@@ -241,6 +241,20 @@ def _build_rid_to_atrophy(base_dir):
     return rid_to_atrophy
 
 
+def _build_rid_to_ptau_imputed():
+    """p-tau217 per RID from the per-split MICE table written by the baselines repo's
+    scripts/impute_plasma.py (measured values kept, missing ones imputed from that split's
+    training subjects). TAUGENNET_PLASMA_CSV names the table of the split being trained/scored
+    (data/raw/plasma_imputed/fold_<k>.csv or refit.csv) — it must match the fold."""
+    path = os.environ.get("TAUGENNET_PLASMA_CSV")
+    if not path:
+        raise ValueError("controls_322 + mode='ptau217' needs TAUGENNET_PLASMA_CSV "
+                         "(data/raw/plasma_imputed/<split>.csv)")
+    df = pd.read_csv(path)
+    print(f"p-tau217 from {path}: {int(df['imputed'].sum())} of {len(df)} imputed")
+    return {str(int(r["RID"])): np.array([r["pT217"]], dtype=np.float32) for _, r in df.iterrows()}
+
+
 def _build_rid_to_ptau(fluid_csv):
     df = pd.read_csv(fluid_csv)
     return {
@@ -264,14 +278,17 @@ def _build_controls_322_dataloaders(mode, base_dir, controls_dir, batch_size, se
                                      use_dk_mask, train_frac, val_frac, fold_idx, n_folds,
                                      suvr_input, suvr_as_cond):
     assert not (suvr_input and suvr_as_cond), "suvr_input and suvr_as_cond are mutually exclusive"
-    if mode != "atrophy":
-        raise ValueError(f"controls_322 cohort currently only supports mode='atrophy', got {mode!r}")
+    if mode not in ("atrophy", "ptau217"):
+        raise ValueError(f"controls_322 cohort supports mode='atrophy' or 'ptau217', got {mode!r}")
 
     rid_to_mri = _build_rid_to_mri(base_dir, extra_cohorts=["1mm_parcellated_CN_subj"])
     print(f"MRI subjects found (incl. CN): {len(rid_to_mri)}")
 
-    rid_to_cond = _build_rid_to_atrophy(base_dir)
-    print(f"Atrophy vectors loaded: {len(rid_to_cond)}")
+    if mode == "ptau217":                     # every subject has a value (measured or MICE-imputed)
+        rid_to_cond = _build_rid_to_ptau_imputed()
+    else:
+        rid_to_cond = _build_rid_to_atrophy(base_dir)
+        print(f"Atrophy vectors loaded: {len(rid_to_cond)}")
 
     test_dict, dev_dict = _load_controls_322_splits(controls_dir)
     keep = keep_set(test_dict, dev_dict)

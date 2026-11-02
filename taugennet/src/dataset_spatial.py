@@ -33,7 +33,7 @@ from torch.utils.data import Dataset, DataLoader
 import pandas as pd
 
 from .config import BASE_DIR, VOL_SHAPE, BATCH_SIZE, SEED, ADNI_FLUID_CSV
-from .atlas_labels import load_atlas, compute_valid_mask, build_atrophy_volume, get_default_atlas_path
+from .atlas_labels import load_atlas, compute_valid_mask, build_atrophy_volume, get_default_atlas_path, load_atlas_on_scan_grid
 from .splits import load_mentor_splits, assign_indices, keep_set
 
 # ── Region columns (same ordering as dataset.py) ──────────────────────────────
@@ -123,7 +123,7 @@ class SpatialTauPETDataset(Dataset):
         # the AE was trained on. Using the broader per-subject mri>0∩atlas mask here
         # was out-of-distribution for the AE and collapsed reconstruction (0.98→0.52).
         if use_dk_mask:
-            binary = (atlas_data > 0).astype(np.float32)                 # labels 1-86 → 1.0
+            binary = (load_atlas_on_scan_grid() > 0).astype(np.float32)  # labels 1-86 → 1.0
             mask_t = torch.from_numpy(binary).unsqueeze(0).unsqueeze(0)  # (1,1,aH,aW,aD)
             self._dk_mask = F.interpolate(mask_t, size=VOL_SHAPE,
                                           mode="nearest").squeeze(0)     # (1, *VOL_SHAPE)

@@ -175,7 +175,8 @@ def train_ae(ae, train_loader, n_epochs, ckpt_path, device,
                           f"Best val={best_val_loss:.4f} at epoch {best_epoch}", flush=True)
                     break
 
-        if (epoch + 1) % 5 == 0:
+        # also at the last epoch: the no-val refit uses this file and its length need not be a multiple of 5
+        if (epoch + 1) % 5 == 0 or epoch + 1 == n_epochs:
             elapsed   = time.time() - start
             remaining = (time.time() - t0) * (n_epochs - epoch - 1)
             print(f"  AE {epoch+1:3d}/{n_epochs}  loss={avg:.4f}{val_str}  "
@@ -262,7 +263,7 @@ def train_diffusion(ae, unet, conditioner, schedule, latent_std,
                     n_epochs, start_epoch, ckpt_path, device,
                     patience=50, val_every=1, monitor_every=25,
                     monitor_dir=None, figures_dir=None, lr=LR,
-                    ema_decay=0.0, min_snr_gamma=0.0, ema_state=None):
+                    ema_decay=0.0, min_snr_gamma=0.0, ema_state=None, weight_decay=1e-4):
     """Train the diffusion U-Net on pre-cached latents.
 
     latent_train_loader / latent_val_loader: yield (z0, zm, cond) — no AE on GPU.
@@ -276,7 +277,7 @@ def train_diffusion(ae, unet, conditioner, schedule, latent_std,
     """
     VAL_SEED  = 0  # fixed seed for deterministic validation timesteps/noise
     trainable = list(unet.parameters()) + conditioner.trainable_parameters()
-    diff_opt  = torch.optim.AdamW(trainable, lr=lr, weight_decay=1e-4)
+    diff_opt  = torch.optim.AdamW(trainable, lr=lr, weight_decay=weight_decay)   # 0 → plain Adam
 
     ema = EMA(unet, decay=ema_decay) if ema_decay and ema_decay > 0 else None
     if ema is not None and ema_state is not None:
@@ -342,7 +343,7 @@ def train_diffusion(ae, unet, conditioner, schedule, latent_std,
 
         # ── Validation loss ───────────────────────────────────────────────────
         val_str = ""
-        if (epoch + 1) % val_every == 0:
+        if latent_val_loader is not None and (epoch + 1) % val_every == 0:
             unet.eval()
             if hasattr(conditioner, "eval"):
                 conditioner.eval()
@@ -387,7 +388,7 @@ def train_diffusion(ae, unet, conditioner, schedule, latent_std,
 
         # ── SSIM monitor ──────────────────────────────────────────────────────
         ssim_str = ""
-        if (epoch + 1) % monitor_every == 0:
+        if len(val_ds) and (epoch + 1) % monitor_every == 0:
             if ema is not None:
                 ema.store(unet); ema.copy_to(unet)
             ssim_val = _monitor_ssim(ae, unet, conditioner, schedule, latent_std,
@@ -399,7 +400,7 @@ def train_diffusion(ae, unet, conditioner, schedule, latent_std,
             ssim_str = f"  SSIM={ssim_val:.3f}"
 
         # ── Logging & checkpoint ──────────────────────────────────────────────
-        if (epoch + 1) % 5 == 0:
+        if (epoch + 1) % 5 == 0 or epoch + 1 == n_epochs:
             print(f"  Epoch {epoch+1:4d}/{n_epochs}"
                   f"  train={avg_train:.6f}{val_str}{ssim_str}"
                   f"  elapsed={elapsed/60:.1f}m  remaining={remaining/60:.1f}m",
@@ -556,6 +557,11 @@ def parse_args():
     p.add_argument("--ema-decay",      type=float, default=0.0,
                    help="EMA decay for the diffusion UNet weights; 0 = OFF (default). "
                         "Typical: 0.999. Eval/inference prefer EMA weights when saved.")
+    p.add_argument("--use-controls-322", action="store_true",
+                   help="cohort from data/raw/controls_322 (CN included; e.g. cohort_v2). ptau217 then "
+                        "reads TAUGENNET_PLASMA_CSV (per-split MICE table)")
+    p.add_argument("--diff-weight-decay", type=float, default=1e-4,
+                   help="diffusion AdamW weight decay (0 = Adam, as in Gong et al.)")
     p.add_argument("--min-snr-gamma",  type=float, default=0.0,
                    help="Min-SNR-gamma loss weighting (eps-prediction form); 0 = OFF "
                         "(uniform, default). Typical: 5.")
@@ -592,7 +598,8 @@ def main():
             _dataset_final.build_dataloaders(
                 mode=dataset_mode, batch_size=args.batch_size, use_dk_mask=args.use_mask,
                 train_frac=train_frac, val_frac=val_frac,
-                use_mentor_split=args.use_mentor_split, **fold_kwargs,
+                use_mentor_split=args.use_mentor_split, use_controls_322=args.use_controls_322,
+                **fold_kwargs,
             )
     print(f"Mode: {args.mode}  |  train={len(train_ds)}  val={len(val_ds)}  test={len(test_ds)}")
 
@@ -644,7 +651,7 @@ def main():
             print(f"Warning: AE checkpoint not found at {args.ae_checkpoint}")
     else:
         ae_losses = train_ae(ae, train_loader, args.ae_epochs, args.ae_checkpoint, device,
-                             val_loader=val_loader, patience=args.patience,
+                             val_loader=val_loader if len(val_ds) else None, patience=args.patience,
                              val_every=args.ae_val_every, figures_dir=args.figures_dir,
                              kl_weight=args.kl_weight, resume=args.resume_ae)
 
@@ -694,8 +701,10 @@ def main():
     print("Pre-computing latents (train)...")
     z_pets_tr, z_mris_tr, conds_tr = precompute_latents(ae, train_ds, device, "Caching train")
 
-    print("Pre-computing latents (val)...")
-    z_pets_val, z_mris_val, conds_val = precompute_latents(ae, val_ds, device, "Caching val")
+    has_val = len(val_ds) > 0                 # the full-pool refit trains without one
+    if has_val:
+        print("Pre-computing latents (val)...")
+        z_pets_val, z_mris_val, conds_val = precompute_latents(ae, val_ds, device, "Caching val")
 
     # Compute latent_std from cached raw (unscaled) train latents if not loaded
     if latent_std is None:
@@ -706,15 +715,15 @@ def main():
     # Scale cached latents
     ls_cpu       = latent_std.cpu()
     z_pets_tr   /= ls_cpu;  z_mris_tr  /= ls_cpu
-    z_pets_val  /= ls_cpu;  z_mris_val /= ls_cpu
+    if has_val:
+        z_pets_val /= ls_cpu;  z_mris_val /= ls_cpu
 
     # ── Build latent DataLoaders ──────────────────────────────────────────────
     lat_train_ds  = LatentDataset(z_pets_tr,  z_mris_tr,  conds_tr)
-    lat_val_ds    = LatentDataset(z_pets_val, z_mris_val, conds_val)
     lat_train_ldr = DataLoader(lat_train_ds, batch_size=args.batch_size,
                                shuffle=True, num_workers=0)
-    lat_val_ldr   = DataLoader(lat_val_ds,   batch_size=args.batch_size,
-                               shuffle=False, num_workers=0)
+    lat_val_ldr   = DataLoader(LatentDataset(z_pets_val, z_mris_val, conds_val),
+                               batch_size=args.batch_size, shuffle=False, num_workers=0) if has_val else None
 
     # ── Train diffusion ───────────────────────────────────────────────────────
     new_losses, new_val_losses = train_diffusion(
@@ -730,6 +739,7 @@ def main():
         ema_decay=args.ema_decay,
         min_snr_gamma=args.min_snr_gamma,
         ema_state=ema_state,
+        weight_decay=args.diff_weight_decay,
     )
     diff_losses     += new_losses
     diff_val_losses += new_val_losses

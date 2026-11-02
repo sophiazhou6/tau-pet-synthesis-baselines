@@ -44,7 +44,7 @@ from src import dataset_final as _dataset_v2
 from src import dataset_combined as _dataset_combined
 from src.dataset_final import unnormalize as _unnormalize
 from src.dataset_final import REGION_COLS
-from src.atlas_labels import load_atlas, get_default_atlas_path
+from src.atlas_labels import load_atlas, get_default_atlas_path, load_atlas_on_scan_grid
 from src.diffusion import DiffusionSchedule
 from src.inference import load_models, synthesize_tau_pet, synthesize_no_mri
 
@@ -128,7 +128,7 @@ def _atlas_dk86_binary():
     """Global DK86 binary mask (atlas labels 1-86 > 0) at VOL_SHAPE, cached."""
     global _ATLAS_DK86_BINARY
     if _ATLAS_DK86_BINARY is None:
-        atlas_data, _, _ = load_atlas(get_default_atlas_path())
+        atlas_data = load_atlas_on_scan_grid()
         bt = torch.from_numpy((atlas_data > 0).astype(np.float32))[None, None]
         b  = F.interpolate(bt, size=VOL_SHAPE, mode="nearest").squeeze().numpy()
         _ATLAS_DK86_BINARY = b > 0
@@ -146,7 +146,7 @@ def _dk86_label_volume(test_ds):
     """
     if hasattr(test_ds, "_dk_mask") and test_ds._dk_mask is None:
         return None  # non-spatial dataset built with --no-use-mask
-    atlas_data, _, _ = load_atlas(get_default_atlas_path())            # (aH,aW,aD) int 0-86
+    atlas_data = load_atlas_on_scan_grid()                             # (182,218,182) int 0-86
     lab_t = torch.from_numpy(atlas_data.astype(np.float32))[None, None]  # (1,1,aH,aW,aD)
     lab   = F.interpolate(lab_t, size=VOL_SHAPE, mode="nearest").squeeze().numpy()
     return np.rint(lab).astype(np.int32)

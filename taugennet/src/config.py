@@ -10,8 +10,10 @@ from tqdm import tqdm
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-SEED = 42
-random.seed(SEED); np.random.seed(SEED); torch.manual_seed(SEED)
+SEED = 42   # also fixes the CV folds (splits.py), so it must stay put when a fold is repeated
+# TAUGENNET_RUN_SEED changes only the training and sampling noise: same subjects, new random draws
+_rng_seed = int(os.environ.get("TAUGENNET_RUN_SEED", SEED))
+random.seed(_rng_seed); np.random.seed(_rng_seed); torch.manual_seed(_rng_seed)
 
 # Volume dimensions
 # (96, 112, 96) covers the full MNI brain at ~2 mm (2× downsampled from 1 mm native),

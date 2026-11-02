@@ -42,6 +42,26 @@ def load_atlas(atlas_path: str) -> tuple:
     return atlas_data, affine, inv_affine
 
 
+# The atlas file is stored RAS on its own 97×115×97 2 mm grid, while the PET and MRI are stored LAS
+# on the MNI152 grid (182×218×182 @ 1 mm, 91×109×91 @ 2 mm — same field of view). Resizing the raw
+# atlas array to VOL_SHAPE therefore mirrors it left↔right and shrinks it ~6 %; it has to be placed
+# on the scans' grid through the NIfTI headers first.
+MNI152_1MM_SHAPE = (182, 218, 182)
+MNI152_1MM_AFFINE = np.array([[-1.0, 0.0, 0.0, 90.0],
+                              [0.0, 1.0, 0.0, -126.0],
+                              [0.0, 0.0, 1.0, -72.0],
+                              [0.0, 0.0, 0.0, 1.0]])
+
+
+def load_atlas_on_scan_grid(atlas_path: str = None) -> np.ndarray:
+    """DK86 labels (int32, 0–86) resampled by nearest neighbour onto the MNI152 1 mm grid that the
+    PET/MRI arrays share, so resizing it to VOL_SHAPE keeps it voxel-aligned with them."""
+    from nibabel.processing import resample_from_to
+    img = nib.load(atlas_path or get_default_atlas_path())
+    out = resample_from_to(img, (MNI152_1MM_SHAPE, MNI152_1MM_AFFINE), order=0)
+    return np.rint(np.asarray(out.dataobj)).astype(np.int32)
+
+
 def compute_valid_mask(mri: np.ndarray, tau: np.ndarray,
                        subject_affine: np.ndarray,
                        atlas_data: np.ndarray,
