@@ -32,3 +32,6 @@ venv/
 
 # Claude Code local config
 .claude/
+
+# Audit scripts write tables next to themselves; some list subject IDs
+cohort_v2/audit/*.csv
