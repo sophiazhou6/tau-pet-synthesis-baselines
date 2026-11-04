@@ -1,0 +1,2 @@
+# Audit scripts write tables next to themselves; some list subject IDs
+audit/*.csv

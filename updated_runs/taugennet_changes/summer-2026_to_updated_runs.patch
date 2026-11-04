@@ -1,0 +1,565 @@
+diff --git a/analysis/render_glass_9case_white.py b/analysis/render_glass_9case_white.py
+index da02719..3775f03 100644
+--- a/analysis/render_glass_9case_white.py
++++ b/analysis/render_glass_9case_white.py
+@@ -2,101 +2,138 @@ import os, sys, inspect, tempfile
+ import numpy as np, pandas as pd
+ import matplotlib; matplotlib.use("Agg")
+ import matplotlib.pyplot as plt
++from matplotlib.colorbar import ColorbarBase
++from matplotlib.colors import Normalize
+ import nibabel as nib
+ import nilearn.plotting as nlplot
+ 
+-ROOT = os.environ.get("TAUGENNET_ROOT", os.path.expanduser("~/taugennet"))
+-DUR  = os.path.expanduser("~/tau-denseunet-baseline/results")
++# cohort_v2 (597 subjects, 120 held-out test) — run with the GitHub taugennet as TAUGENNET_ROOT
++# (its data/raw links to raw_v2) so the test set and its order are the evaluator's.
++ROOT = os.environ.get("TAUGENNET_ROOT", "/scratch/network/sz3962/tau-pet-synthesis-baselines/taugennet")
++DUR  = "/scratch/network/sz3962/tau-denseunet-baseline/results"
+ sys.path.insert(0, ROOT); sys.path.insert(0, os.path.join(ROOT, "scripts"))
+ from src.config import VOL_SHAPE
+-from src.dataset_final import unnormalize
+-from src.dataset_spatial import build_dataloaders
++from src.dataset_final import unnormalize, build_dataloaders
+ import glass_brain_final as GB
+-from glass_brain_final import TAU_CMAP, _compute_affine
++from glass_brain_final import _compute_affine
+ 
+ DPI = getattr(GB, "DPI", 150)
+ FG  = "#111111"                      # dark text on white
++CMAP, VMIN = "hot_r", 0.0            # Raj-lab convention (Anil): hot_r from 0, one "Tau SUVR" bar
+ 
+ def render_glass_white(vol, affine, cmap, vmin, vmax, threshold=1e-3):
+     """Same as glass_brain_final._render_glass but light-themed.
+     black_bg=False makes nilearn draw the brain outline DARK, so it stays
+     visible on white. Data encoding (cmap, vmin, vmax) is untouched."""
+     nii = nib.Nifti1Image(vol.astype(np.float32), affine=affine)
+-    fig = plt.figure(figsize=(8, 3.5), facecolor="white")
+-    disp = nlplot.plot_glass_brain(nii, figure=fig, display_mode="ortho",
+-                                   colorbar=False, cmap=cmap, vmin=vmin, vmax=vmax,
+-                                   black_bg=False, threshold=threshold, annotate=False)
++    fig = plt.figure(figsize=(13, 3.75), facecolor="white")   # one row of Anil's 13×7.5 GT/Pred figure
++    disp = nlplot.plot_glass_brain(nii, figure=fig, display_mode="lyrz",   # Anil's four views
++                                   colorbar=False, cmap=cmap, vmin=vmin, vmax=vmax, symmetric_cbar=False,
++                                   black_bg=False, threshold=threshold, title=None)
+     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f: tmp = f.name
+     disp.savefig(tmp, dpi=DPI); disp.close(); plt.close(fig)
+     img = plt.imread(tmp); os.unlink(tmp)
+     return img
+ 
+-RIDS = [6516, 6449, 6374, 6911, 6880, 6702, 6545, 6840, 6976]
+-OUT  = os.path.expanduser("~/fig_glass_9case_whitebg"); os.makedirs(OUT, exist_ok=True)
++# 3 CN / 3 MCI / 3 AD test subjects whose Dense-U-Net (final model) per-subject r is closest to their
++# group's median, among subjects with a measured plasma p-tau217 (so TauGenNet can show the same people):
++# make_composite_figure.py --run denseunet_paper_refit --pick-cases
++# Passed as GLASS_RIDS="rid,rid,..." so subject IDs stay out of the repository.
++RIDS = [int(r) for r in os.environ["GLASS_RIDS"].split(",")]
++OUT  = f"{DUR}/figures/baselines/cohort_v2/glass_9case_whitebg"; os.makedirs(OUT, exist_ok=True)
+ V = [
+- ("DU_plain",   f"{DUR}/generated/controls322_plain_v2",        f"{DUR}/records/denseunet_baseline/controls322_plain_v2"),
+- ("DU_atrophy", f"{DUR}/generated/controls322_paint_atrophy",   f"{DUR}/records/denseunet_baseline/controls322_paint_atrophy"),
+- ("DU_suvr",    f"{DUR}/generated/controls322_suvr_lr1e-4_wd0", f"{DUR}/records/denseunet_baseline/controls322_suvr_lr1e-4_wd0"),
+- ("DU_both",    f"{DUR}/generated/controls322_paint_both",      f"{DUR}/records/denseunet_baseline/controls322_paint_both"),
+- ("TG_atrophy", f"{ROOT}/results/generated/controls_322_TEST/final_t1_atrophy_enc",     f"{ROOT}/results/records/controls_322_TEST/final_t1_atrophy_enc"),
+- ("TG_suvr",    f"{ROOT}/results/generated/controls_322_TEST/final_t2_suvr_enc",        f"{ROOT}/results/records/controls_322_TEST/final_t2_suvr_enc"),
+- ("TG_both",    f"{ROOT}/results/generated/controls_322_TEST/final_t2b_both_enc",       f"{ROOT}/results/records/controls_322_TEST/final_t2b_both_enc"),
+- ("TG_plasma",  f"{ROOT}/results/generated/controls_322_TEST/final_t3_suvr_enc_plasma", f"{ROOT}/results/records/controls_322_TEST/final_t3_suvr_enc_plasma"),
++ ("Dense-U-Net", f"{DUR}/generated/baselines/cohort_v2/denseunet_paper_refit/single", f"{DUR}/records/baselines/cohort_v2/denseunet_paper_refit/single"),
++ ("TauGenNet", f"{DUR}/generated/baselines/cohort_v2/taugennet_paper/single", f"{DUR}/records/baselines/cohort_v2/taugennet_paper/single"),
+ ]
+ 
+ sig = inspect.signature(build_dataloaders)
+-kw  = {k: v for k, v in [("use_controls_322", True), ("use_dk_mask", True),
+-                         ("cond_mode", "none")] if k in sig.parameters}
+-_, _, test_ds, *_ = build_dataloaders(**kw)
++kw  = {k: v for k, v in [("use_controls_322", True), ("use_dk_mask", True)] if k in sig.parameters}
++_, _, test_ds, *_ = build_dataloaders("atrophy", **kw)
+ print("len(test_ds) =", len(test_ds))
+ affine = _compute_affine(test_ds, VOL_SHAPE)
+ 
+-base = pd.read_csv(f"{ROOT}/results/records/controls_322_TEST/final_t1_atrophy_enc/per_subject_wholebrain.csv")
++base = pd.read_csv(f"{V[0][2]}/per_subject_wholebrain.csv")
+ bidx = {int(r.RID): int(r.subject_idx.split("_")[1]) for r in base.itertuples()}
+ grp  = {int(r.RID): r.group for r in base.itertuples()}
+ 
+ reals, norms = {}, {}
+ for rid in RIDS:
+-    i = bidx[rid]; pet = np.asarray(test_ds[i][0]).squeeze()
++    i = bidx[rid]; assert f"RID_{rid}" in test_ds.pet_paths[i], (rid, test_ds.pet_paths[i])
++    pet = np.asarray(test_ds[i][0]).squeeze()
+     pmin, pmax = test_ds.get_pet_norms(i)
+     reals[rid] = unnormalize(pet, pmin, pmax); norms[rid] = (pmin, pmax, pet)
+-VMAX = float(np.percentile(np.concatenate([v[v > 0].ravel() for v in reals.values()]), 99))
+-print(f"shared pet_vmax = {VMAX:.3f}   (unchanged from the black-bg version)")
+ 
+-real_img = {rid: render_glass_white(reals[rid], affine, TAU_CMAP, 0.0, VMAX, 1e-3) for rid in RIDS}
+-print("real row rendered")
+-
+-def sheet(rows, path, title):
+-    fig, ax = plt.subplots(len(rows), len(RIDS),
+-                           figsize=(2.2*len(RIDS), 1.9*len(rows)), dpi=200, facecolor="white")
+-    ax = np.atleast_2d(ax)
+-    for r, (lbl, imgs) in enumerate(rows):
+-        for c, rid in enumerate(RIDS):
+-            a = ax[r, c]; a.axis("off"); a.set_facecolor("white")
+-            if imgs.get(rid) is not None: a.imshow(imgs[rid])
+-            else: a.text(.5, .5, "n/a", ha="center", va="center", color="#999999", fontsize=8)
+-            if r == 0: a.set_title(f"RID {rid}\n{grp.get(rid,'')}", color=FG, fontsize=8)
+-            if c == 0: a.text(-.06, .5, lbl, transform=a.transAxes, rotation=90,
+-                              va="center", ha="center", color=FG, fontsize=8)
+-    fig.suptitle(title, color=FG, fontsize=10)
+-    fig.subplots_adjust(wspace=.02, hspace=.02, top=.90)
+-    fig.savefig(path, bbox_inches="tight", facecolor="white"); plt.close(fig)
++def load_gen(gdir, i):
++    """Generated volume i (normalized); predictions may be loose .npy or packed predictions.npz."""
++    f = f"{gdir}/subject_{i:03d}.npy"
++    if os.path.exists(f): return np.load(f).squeeze()
++    if os.path.exists(f"{gdir}/predictions.npz"):
++        with np.load(f"{gdir}/predictions.npz") as z:
++            return z[f"subject_{i:03d}"].squeeze() if f"subject_{i:03d}" in z.files else None
++    return None
+ 
+-all_rows = [("Real", real_img)]
++gens = {}
+ for name, gdir, rdir in V:
+     d = pd.read_csv(f"{rdir}/per_subject_wholebrain.csv")
+     m = {int(r.RID): int(r.subject_idx.split("_")[1]) for r in d.itertuples()}
+-    imgs = {}
++    gens[name] = {}
+     for rid in RIDS:
+-        f = f"{gdir}/subject_{m[rid]:03d}.npy" if rid in m else None
+-        if not f or not os.path.exists(f): imgs[rid] = None; continue
++        g = load_gen(gdir, m[rid]) if rid in m else None
++        if g is None: gens[name][rid] = None; continue
+         pmin, pmax, petn = norms[rid]
+-        g = unnormalize(np.load(f).squeeze(), pmin, pmax); g[petn <= 0] = 0
+-        imgs[rid] = render_glass_white(g, affine, TAU_CMAP, 0.0, VMAX, 1e-3)
+-    sheet([("Real", real_img), ("Generated", imgs)], f"{OUT}/glass2row_{name}.png",
+-          f"{name}  —  real (top) vs generated (bottom),  SUVR 0–{VMAX:.2f}")
++        g = unnormalize(g, pmin, pmax); g[petn <= 0] = 0
++        gens[name][rid] = g
++
++# Anil's range: 0 → highest in-brain SUVR (real and generated, all cases) rounded up to 0.5, ≥ 1.5
++vox  = np.concatenate([v[norms[k][2] > 0] for k, v in reals.items()] +
++                      [v[norms[k][2] > 0] for gd in gens.values() for k, v in gd.items() if v is not None])
++VMAX = max(float(np.ceil(vox.max() * 2) / 2), 1.5)
++print(f"shared colour range: SUVR {VMIN:g}–{VMAX:g}")
++
++real_img = {rid: render_glass_white(reals[rid], affine, CMAP, VMIN, VMAX, 1e-3) for rid in RIDS}
++print("real row rendered")
++
++def sheet(rows, path, title):
++    """3×3 grid of cases — one row per diagnosis, 3 subjects across; each cell stacks the
++    `rows` renders (GT over Pred, as in Anil's per-subject glass figure)."""
++    groups = list(dict.fromkeys(grp[rid] for rid in RIDS))
++    cases = [[rid for rid in RIDS if grp[rid] == g] for g in groups]
++    ncol, nst = max(map(len, cases)), len(rows)
++    aspect = next(iter(real_img.values())).shape[0] / next(iter(real_img.values())).shape[1]
++    w, gap = 5.2, 0.35                                # cell width (in), gap between diagnosis rows
++    hts = ([w * aspect] * nst + [gap]) * len(groups)
++    fig = plt.figure(figsize=(w * ncol + 1.4, sum(hts) + 0.5), dpi=200, facecolor="white")
++    gs = fig.add_gridspec(len(hts), ncol, height_ratios=hts, wspace=.03, hspace=0,
++                          left=.06, right=.92, top=1 - 0.5 / (sum(hts) + 0.5), bottom=0)
++    for gi, (g, rids) in enumerate(zip(groups, cases)):
++        for c, rid in enumerate(rids):
++            for s, (lbl, imgs) in enumerate(rows):
++                a = fig.add_subplot(gs[gi * (nst + 1) + s, c]); a.axis("off")
++                if imgs.get(rid) is not None: a.imshow(imgs[rid])
++                else: a.text(.5, .5, "n/a", ha="center", va="center", color="#999999", fontsize=8)
++                if s == 0: a.set_title(f"RID {rid}", color=FG, fontsize=9, pad=2)
++                if c == 0:
++                    a.text(-.02, .5, lbl, transform=a.transAxes, va="center", ha="right",
++                           color=FG, fontsize=9, fontweight="bold")
++                    if s == 0:
++                        a.text(-.16, 1 - nst / 2, g, transform=a.transAxes, rotation=90, va="center",
++                               ha="center", color=FG, fontsize=12, fontweight="bold")
++    fig.suptitle(title, color=FG, fontsize=13, fontweight="bold")
++    cax = fig.add_axes([.935, .2, .01, .6])
++    cb = ColorbarBase(cax, cmap=plt.get_cmap(CMAP), norm=Normalize(vmin=VMIN, vmax=VMAX), orientation="vertical")
++    cb.set_label("Tau SUVR", color=FG, fontsize=11); cb.ax.tick_params(labelsize=9, colors=FG)
++    fig.savefig(path, bbox_inches="tight", facecolor="white"); plt.close(fig)
++
++all_rows = [("GT", real_img)]
++for name, gdir, rdir in V:
++    imgs = {rid: None if g is None else render_glass_white(g, affine, CMAP, VMIN, VMAX, 1e-3)
++            for rid, g in gens[name].items()}
++    fn = name.lower().replace("-", "").replace(" ", "_")
++    sheet([("GT", real_img), ("Pred", imgs)], f"{OUT}/glass2row_{fn}.png",
++          f"Voxel Tau SUVR — GT vs Predicted — {name}, held-out test")
+     all_rows.append((name, imgs))
+-    print(f"  wrote glass2row_{name}.png  ({sum(v is not None for v in imgs.values())}/{len(RIDS)})")
++    print(f"  wrote glass2row_{fn}.png  ({sum(v is not None for v in imgs.values())}/{len(RIDS)})")
+ 
+-sheet(all_rows, f"{OUT}/glass_all_variants.png", f"Real + all 8 variants,  SUVR 0–{VMAX:.2f}")
++if len(V) > 1:
++    sheet(all_rows, f"{OUT}/glass_all_models.png", "Voxel Tau SUVR — GT vs every model, held-out test")
+ print("done ->", OUT)
+diff --git a/taugennet/scripts/evaluate_final.py b/taugennet/scripts/evaluate_final.py
+index b21f1bf..7a0f18b 100644
+--- a/taugennet/scripts/evaluate_final.py
++++ b/taugennet/scripts/evaluate_final.py
+@@ -44,7 +44,7 @@ from src import dataset_final as _dataset_v2
+ from src import dataset_combined as _dataset_combined
+ from src.dataset_final import unnormalize as _unnormalize
+ from src.dataset_final import REGION_COLS
+-from src.atlas_labels import load_atlas, get_default_atlas_path
++from src.atlas_labels import load_atlas, get_default_atlas_path, load_atlas_on_scan_grid
+ from src.diffusion import DiffusionSchedule
+ from src.inference import load_models, synthesize_tau_pet, synthesize_no_mri
+ 
+@@ -128,7 +128,7 @@ def _atlas_dk86_binary():
+     """Global DK86 binary mask (atlas labels 1-86 > 0) at VOL_SHAPE, cached."""
+     global _ATLAS_DK86_BINARY
+     if _ATLAS_DK86_BINARY is None:
+-        atlas_data, _, _ = load_atlas(get_default_atlas_path())
++        atlas_data = load_atlas_on_scan_grid()
+         bt = torch.from_numpy((atlas_data > 0).astype(np.float32))[None, None]
+         b  = F.interpolate(bt, size=VOL_SHAPE, mode="nearest").squeeze().numpy()
+         _ATLAS_DK86_BINARY = b > 0
+@@ -146,7 +146,7 @@ def _dk86_label_volume(test_ds):
+     """
+     if hasattr(test_ds, "_dk_mask") and test_ds._dk_mask is None:
+         return None  # non-spatial dataset built with --no-use-mask
+-    atlas_data, _, _ = load_atlas(get_default_atlas_path())            # (aH,aW,aD) int 0-86
++    atlas_data = load_atlas_on_scan_grid()                             # (182,218,182) int 0-86
+     lab_t = torch.from_numpy(atlas_data.astype(np.float32))[None, None]  # (1,1,aH,aW,aD)
+     lab   = F.interpolate(lab_t, size=VOL_SHAPE, mode="nearest").squeeze().numpy()
+     return np.rint(lab).astype(np.int32)
+diff --git a/taugennet/scripts/train.py b/taugennet/scripts/train.py
+index 3ad5c10..1c2d483 100644
+--- a/taugennet/scripts/train.py
++++ b/taugennet/scripts/train.py
+@@ -175,7 +175,8 @@ def train_ae(ae, train_loader, n_epochs, ckpt_path, device,
+                           f"Best val={best_val_loss:.4f} at epoch {best_epoch}", flush=True)
+                     break
+ 
+-        if (epoch + 1) % 5 == 0:
++        # also at the last epoch: the no-val refit uses this file and its length need not be a multiple of 5
++        if (epoch + 1) % 5 == 0 or epoch + 1 == n_epochs:
+             elapsed   = time.time() - start
+             remaining = (time.time() - t0) * (n_epochs - epoch - 1)
+             print(f"  AE {epoch+1:3d}/{n_epochs}  loss={avg:.4f}{val_str}  "
+@@ -262,7 +263,7 @@ def train_diffusion(ae, unet, conditioner, schedule, latent_std,
+                     n_epochs, start_epoch, ckpt_path, device,
+                     patience=50, val_every=1, monitor_every=25,
+                     monitor_dir=None, figures_dir=None, lr=LR,
+-                    ema_decay=0.0, min_snr_gamma=0.0, ema_state=None):
++                    ema_decay=0.0, min_snr_gamma=0.0, ema_state=None, weight_decay=1e-4):
+     """Train the diffusion U-Net on pre-cached latents.
+ 
+     latent_train_loader / latent_val_loader: yield (z0, zm, cond) — no AE on GPU.
+@@ -276,7 +277,7 @@ def train_diffusion(ae, unet, conditioner, schedule, latent_std,
+     """
+     VAL_SEED  = 0  # fixed seed for deterministic validation timesteps/noise
+     trainable = list(unet.parameters()) + conditioner.trainable_parameters()
+-    diff_opt  = torch.optim.AdamW(trainable, lr=lr, weight_decay=1e-4)
++    diff_opt  = torch.optim.AdamW(trainable, lr=lr, weight_decay=weight_decay)   # 0 → plain Adam
+ 
+     ema = EMA(unet, decay=ema_decay) if ema_decay and ema_decay > 0 else None
+     if ema is not None and ema_state is not None:
+@@ -342,7 +343,7 @@ def train_diffusion(ae, unet, conditioner, schedule, latent_std,
+ 
+         # ── Validation loss ───────────────────────────────────────────────────
+         val_str = ""
+-        if (epoch + 1) % val_every == 0:
++        if latent_val_loader is not None and (epoch + 1) % val_every == 0:
+             unet.eval()
+             if hasattr(conditioner, "eval"):
+                 conditioner.eval()
+@@ -387,7 +388,7 @@ def train_diffusion(ae, unet, conditioner, schedule, latent_std,
+ 
+         # ── SSIM monitor ──────────────────────────────────────────────────────
+         ssim_str = ""
+-        if (epoch + 1) % monitor_every == 0:
++        if len(val_ds) and (epoch + 1) % monitor_every == 0:
+             if ema is not None:
+                 ema.store(unet); ema.copy_to(unet)
+             ssim_val = _monitor_ssim(ae, unet, conditioner, schedule, latent_std,
+@@ -399,7 +400,7 @@ def train_diffusion(ae, unet, conditioner, schedule, latent_std,
+             ssim_str = f"  SSIM={ssim_val:.3f}"
+ 
+         # ── Logging & checkpoint ──────────────────────────────────────────────
+-        if (epoch + 1) % 5 == 0:
++        if (epoch + 1) % 5 == 0 or epoch + 1 == n_epochs:
+             print(f"  Epoch {epoch+1:4d}/{n_epochs}"
+                   f"  train={avg_train:.6f}{val_str}{ssim_str}"
+                   f"  elapsed={elapsed/60:.1f}m  remaining={remaining/60:.1f}m",
+@@ -556,6 +557,11 @@ def parse_args():
+     p.add_argument("--ema-decay",      type=float, default=0.0,
+                    help="EMA decay for the diffusion UNet weights; 0 = OFF (default). "
+                         "Typical: 0.999. Eval/inference prefer EMA weights when saved.")
++    p.add_argument("--use-controls-322", action="store_true",
++                   help="cohort from data/raw/controls_322 (CN included; e.g. cohort_v2). ptau217 then "
++                        "reads TAUGENNET_PLASMA_CSV (per-split MICE table)")
++    p.add_argument("--diff-weight-decay", type=float, default=1e-4,
++                   help="diffusion AdamW weight decay (0 = Adam, as in Gong et al.)")
+     p.add_argument("--min-snr-gamma",  type=float, default=0.0,
+                    help="Min-SNR-gamma loss weighting (eps-prediction form); 0 = OFF "
+                         "(uniform, default). Typical: 5.")
+@@ -592,7 +598,8 @@ def main():
+             _dataset_final.build_dataloaders(
+                 mode=dataset_mode, batch_size=args.batch_size, use_dk_mask=args.use_mask,
+                 train_frac=train_frac, val_frac=val_frac,
+-                use_mentor_split=args.use_mentor_split, **fold_kwargs,
++                use_mentor_split=args.use_mentor_split, use_controls_322=args.use_controls_322,
++                **fold_kwargs,
+             )
+     print(f"Mode: {args.mode}  |  train={len(train_ds)}  val={len(val_ds)}  test={len(test_ds)}")
+ 
+@@ -644,7 +651,7 @@ def main():
+             print(f"Warning: AE checkpoint not found at {args.ae_checkpoint}")
+     else:
+         ae_losses = train_ae(ae, train_loader, args.ae_epochs, args.ae_checkpoint, device,
+-                             val_loader=val_loader, patience=args.patience,
++                             val_loader=val_loader if len(val_ds) else None, patience=args.patience,
+                              val_every=args.ae_val_every, figures_dir=args.figures_dir,
+                              kl_weight=args.kl_weight, resume=args.resume_ae)
+ 
+@@ -694,8 +701,10 @@ def main():
+     print("Pre-computing latents (train)...")
+     z_pets_tr, z_mris_tr, conds_tr = precompute_latents(ae, train_ds, device, "Caching train")
+ 
+-    print("Pre-computing latents (val)...")
+-    z_pets_val, z_mris_val, conds_val = precompute_latents(ae, val_ds, device, "Caching val")
++    has_val = len(val_ds) > 0                 # the full-pool refit trains without one
++    if has_val:
++        print("Pre-computing latents (val)...")
++        z_pets_val, z_mris_val, conds_val = precompute_latents(ae, val_ds, device, "Caching val")
+ 
+     # Compute latent_std from cached raw (unscaled) train latents if not loaded
+     if latent_std is None:
+@@ -706,15 +715,15 @@ def main():
+     # Scale cached latents
+     ls_cpu       = latent_std.cpu()
+     z_pets_tr   /= ls_cpu;  z_mris_tr  /= ls_cpu
+-    z_pets_val  /= ls_cpu;  z_mris_val /= ls_cpu
++    if has_val:
++        z_pets_val /= ls_cpu;  z_mris_val /= ls_cpu
+ 
+     # ── Build latent DataLoaders ──────────────────────────────────────────────
+     lat_train_ds  = LatentDataset(z_pets_tr,  z_mris_tr,  conds_tr)
+-    lat_val_ds    = LatentDataset(z_pets_val, z_mris_val, conds_val)
+     lat_train_ldr = DataLoader(lat_train_ds, batch_size=args.batch_size,
+                                shuffle=True, num_workers=0)
+-    lat_val_ldr   = DataLoader(lat_val_ds,   batch_size=args.batch_size,
+-                               shuffle=False, num_workers=0)
++    lat_val_ldr   = DataLoader(LatentDataset(z_pets_val, z_mris_val, conds_val),
++                               batch_size=args.batch_size, shuffle=False, num_workers=0) if has_val else None
+ 
+     # ── Train diffusion ───────────────────────────────────────────────────────
+     new_losses, new_val_losses = train_diffusion(
+@@ -730,6 +739,7 @@ def main():
+         ema_decay=args.ema_decay,
+         min_snr_gamma=args.min_snr_gamma,
+         ema_state=ema_state,
++        weight_decay=args.diff_weight_decay,
+     )
+     diff_losses     += new_losses
+     diff_val_losses += new_val_losses
+diff --git a/taugennet/src/atlas_labels.py b/taugennet/src/atlas_labels.py
+index 342a5d7..7009df8 100644
+--- a/taugennet/src/atlas_labels.py
++++ b/taugennet/src/atlas_labels.py
+@@ -42,6 +42,26 @@ def load_atlas(atlas_path: str) -> tuple:
+     return atlas_data, affine, inv_affine
+ 
+ 
++# The atlas file is stored RAS on its own 97×115×97 2 mm grid, while the PET and MRI are stored LAS
++# on the MNI152 grid (182×218×182 @ 1 mm, 91×109×91 @ 2 mm — same field of view). Resizing the raw
++# atlas array to VOL_SHAPE therefore mirrors it left↔right and shrinks it ~6 %; it has to be placed
++# on the scans' grid through the NIfTI headers first.
++MNI152_1MM_SHAPE = (182, 218, 182)
++MNI152_1MM_AFFINE = np.array([[-1.0, 0.0, 0.0, 90.0],
++                              [0.0, 1.0, 0.0, -126.0],
++                              [0.0, 0.0, 1.0, -72.0],
++                              [0.0, 0.0, 0.0, 1.0]])
++
++
++def load_atlas_on_scan_grid(atlas_path: str = None) -> np.ndarray:
++    """DK86 labels (int32, 0–86) resampled by nearest neighbour onto the MNI152 1 mm grid that the
++    PET/MRI arrays share, so resizing it to VOL_SHAPE keeps it voxel-aligned with them."""
++    from nibabel.processing import resample_from_to
++    img = nib.load(atlas_path or get_default_atlas_path())
++    out = resample_from_to(img, (MNI152_1MM_SHAPE, MNI152_1MM_AFFINE), order=0)
++    return np.rint(np.asarray(out.dataobj)).astype(np.int32)
++
++
+ def compute_valid_mask(mri: np.ndarray, tau: np.ndarray,
+                        subject_affine: np.ndarray,
+                        atlas_data: np.ndarray,
+diff --git a/taugennet/src/config.py b/taugennet/src/config.py
+index 2e5b203..240467b 100644
+--- a/taugennet/src/config.py
++++ b/taugennet/src/config.py
+@@ -10,8 +10,10 @@ from tqdm import tqdm
+ 
+ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+ 
+-SEED = 42
+-random.seed(SEED); np.random.seed(SEED); torch.manual_seed(SEED)
++SEED = 42   # also fixes the CV folds (splits.py), so it must stay put when a fold is repeated
++# TAUGENNET_RUN_SEED changes only the training and sampling noise: same subjects, new random draws
++_rng_seed = int(os.environ.get("TAUGENNET_RUN_SEED", SEED))
++random.seed(_rng_seed); np.random.seed(_rng_seed); torch.manual_seed(_rng_seed)
+ 
+ # Volume dimensions
+ # (96, 112, 96) covers the full MNI brain at ~2 mm (2× downsampled from 1 mm native),
+diff --git a/taugennet/src/dataset_combined.py b/taugennet/src/dataset_combined.py
+index 9338a89..ad07b23 100644
+--- a/taugennet/src/dataset_combined.py
++++ b/taugennet/src/dataset_combined.py
+@@ -24,7 +24,7 @@ from torch.utils.data import Dataset, DataLoader
+ import pandas as pd
+ 
+ from .config import BASE_DIR, VOL_SHAPE, BATCH_SIZE, ADNI_FLUID_CSV, SEED
+-from .atlas_labels import load_atlas, get_default_atlas_path
++from .atlas_labels import load_atlas, get_default_atlas_path, load_atlas_on_scan_grid
+ from .splits import load_mentor_splits, assign_indices, keep_set
+ 
+ # ── FreeSurfer atlas ID → column name prefix ──────────────────────────────────
+@@ -93,7 +93,7 @@ class TauPETDataset(Dataset):
+         self.cond_values = cond_values
+         self.use_dk_mask = use_dk_mask
+         if use_dk_mask:
+-            atlas_data, _, _ = load_atlas(get_default_atlas_path())
++            atlas_data = load_atlas_on_scan_grid()
+             binary = (atlas_data > 0).astype(np.float32)
+             mask_t = torch.from_numpy(binary).unsqueeze(0).unsqueeze(0)
+             self._dk_mask = F.interpolate(mask_t, size=VOL_SHAPE,
+diff --git a/taugennet/src/dataset_final.py b/taugennet/src/dataset_final.py
+index 9c9caa3..a3e7459 100644
+--- a/taugennet/src/dataset_final.py
++++ b/taugennet/src/dataset_final.py
+@@ -36,7 +36,7 @@ from torch.utils.data import Dataset, DataLoader
+ import pandas as pd
+ 
+ from .config import BASE_DIR, VOL_SHAPE, BATCH_SIZE, ADNI_FLUID_CSV, SEED
+-from .atlas_labels import load_atlas, get_default_atlas_path
++from .atlas_labels import load_atlas, get_default_atlas_path, load_atlas_on_scan_grid
+ from .splits import load_mentor_splits, assign_indices, keep_set
+ 
+ # ── FreeSurfer atlas ID → column name prefix ──────────────────────────────────
+@@ -120,7 +120,7 @@ class TauPETDataset(Dataset):
+         # label volume) at VOL_SHAPE resolution. All subjects are in MNI space, so one shared
+         # mask/label-volume applies to all — same assumption the existing mask already relies on.
+         if use_dk_mask or suvr_values is not None:
+-            atlas_data, _, _ = load_atlas(get_default_atlas_path())
++            atlas_data = load_atlas_on_scan_grid()
+             if use_dk_mask:
+                 binary = (atlas_data > 0).astype(np.float32)  # labels 1-86 → 1.0
+                 mask_t = torch.from_numpy(binary).unsqueeze(0).unsqueeze(0)  # (1,1,aH,aW,aD)
+@@ -241,6 +241,20 @@ def _build_rid_to_atrophy(base_dir):
+     return rid_to_atrophy
+ 
+ 
++def _build_rid_to_ptau_imputed():
++    """p-tau217 per RID from the per-split MICE table written by the baselines repo's
++    scripts/impute_plasma.py (measured values kept, missing ones imputed from that split's
++    training subjects). TAUGENNET_PLASMA_CSV names the table of the split being trained/scored
++    (data/raw/plasma_imputed/fold_<k>.csv or refit.csv) — it must match the fold."""
++    path = os.environ.get("TAUGENNET_PLASMA_CSV")
++    if not path:
++        raise ValueError("controls_322 + mode='ptau217' needs TAUGENNET_PLASMA_CSV "
++                         "(data/raw/plasma_imputed/<split>.csv)")
++    df = pd.read_csv(path)
++    print(f"p-tau217 from {path}: {int(df['imputed'].sum())} of {len(df)} imputed")
++    return {str(int(r["RID"])): np.array([r["pT217"]], dtype=np.float32) for _, r in df.iterrows()}
++
++
+ def _build_rid_to_ptau(fluid_csv):
+     df = pd.read_csv(fluid_csv)
+     return {
+@@ -264,14 +278,17 @@ def _build_controls_322_dataloaders(mode, base_dir, controls_dir, batch_size, se
+                                      use_dk_mask, train_frac, val_frac, fold_idx, n_folds,
+                                      suvr_input, suvr_as_cond):
+     assert not (suvr_input and suvr_as_cond), "suvr_input and suvr_as_cond are mutually exclusive"
+-    if mode != "atrophy":
+-        raise ValueError(f"controls_322 cohort currently only supports mode='atrophy', got {mode!r}")
++    if mode not in ("atrophy", "ptau217"):
++        raise ValueError(f"controls_322 cohort supports mode='atrophy' or 'ptau217', got {mode!r}")
+ 
+     rid_to_mri = _build_rid_to_mri(base_dir, extra_cohorts=["1mm_parcellated_CN_subj"])
+     print(f"MRI subjects found (incl. CN): {len(rid_to_mri)}")
+ 
+-    rid_to_cond = _build_rid_to_atrophy(base_dir)
+-    print(f"Atrophy vectors loaded: {len(rid_to_cond)}")
++    if mode == "ptau217":                     # every subject has a value (measured or MICE-imputed)
++        rid_to_cond = _build_rid_to_ptau_imputed()
++    else:
++        rid_to_cond = _build_rid_to_atrophy(base_dir)
++        print(f"Atrophy vectors loaded: {len(rid_to_cond)}")
+ 
+     test_dict, dev_dict = _load_controls_322_splits(controls_dir)
+     keep = keep_set(test_dict, dev_dict)
+diff --git a/taugennet/src/dataset_spatial.py b/taugennet/src/dataset_spatial.py
+index 6ef1aba..b2a3647 100644
+--- a/taugennet/src/dataset_spatial.py
++++ b/taugennet/src/dataset_spatial.py
+@@ -33,7 +33,7 @@ from torch.utils.data import Dataset, DataLoader
+ import pandas as pd
+ 
+ from .config import BASE_DIR, VOL_SHAPE, BATCH_SIZE, SEED, ADNI_FLUID_CSV
+-from .atlas_labels import load_atlas, compute_valid_mask, build_atrophy_volume, get_default_atlas_path
++from .atlas_labels import load_atlas, compute_valid_mask, build_atrophy_volume, get_default_atlas_path, load_atlas_on_scan_grid
+ from .splits import load_mentor_splits, assign_indices, keep_set
+ 
+ # ── Region columns (same ordering as dataset.py) ──────────────────────────────
+@@ -123,7 +123,7 @@ class SpatialTauPETDataset(Dataset):
+         # the AE was trained on. Using the broader per-subject mri>0∩atlas mask here
+         # was out-of-distribution for the AE and collapsed reconstruction (0.98→0.52).
+         if use_dk_mask:
+-            binary = (atlas_data > 0).astype(np.float32)                 # labels 1-86 → 1.0
++            binary = (load_atlas_on_scan_grid() > 0).astype(np.float32)  # labels 1-86 → 1.0
+             mask_t = torch.from_numpy(binary).unsqueeze(0).unsqueeze(0)  # (1,1,aH,aW,aD)
+             self._dk_mask = F.interpolate(mask_t, size=VOL_SHAPE,
+                                           mode="nearest").squeeze(0)     # (1, *VOL_SHAPE)
+diff --git a/taugennet/src/diffusion.py b/taugennet/src/diffusion.py
+index 5fbdfd0..19fd400 100644
+--- a/taugennet/src/diffusion.py
++++ b/taugennet/src/diffusion.py
+@@ -92,6 +92,25 @@ class DiffusionSchedule:
+             return mean
+         return mean + self.post_var[t_idx].sqrt() * torch.randn_like(zt)
+ 
++    @torch.no_grad()
++    def p_sample_respaced(self, model, zt, t_idx, t_prev_idx, zm, ctx):
++        """DDPM ancestral step from t to the previous step t_prev of a respaced sequence
++        (Nichol & Dhariwal 2021, §4): the posterior q(z_prev | z_t, z0_hat) with
++        β' = 1 − ā_t / ā_prev. Identical to p_sample when t_prev = t − 1; t_prev_idx = −1 means
++        ā_prev = 1 (the final step returns z0_hat)."""
++        t_batch = torch.full((zt.shape[0],), t_idx, device=self.device, dtype=torch.long)
++        eps_hat = model(torch.cat([zt, zm], dim=1), t_batch, ctx)
++        ab_t    = self.alpha_bar[t_idx]
++        ab_prev = self.alpha_bar[t_prev_idx] if t_prev_idx >= 0 else torch.ones((), device=ab_t.device)
++        beta    = 1 - ab_t / ab_prev
++        z0_hat  = (zt - (1 - ab_t).sqrt() * eps_hat) / ab_t.sqrt()
++        mean    = (ab_prev.sqrt() * beta / (1 - ab_t)) * z0_hat \
++            + ((1 - beta).sqrt() * (1 - ab_prev) / (1 - ab_t)) * zt
++        if t_prev_idx < 0:
++            return mean
++        var = (beta * (1 - ab_prev) / (1 - ab_t)).clamp(min=1e-20)
++        return mean + var.sqrt() * torch.randn_like(zt)
++
+     @torch.no_grad()
+     def ddim_sample(self, model, zt, t_idx, t_prev_idx, zm, ctx):
+         """One DDIM reverse step — correct for any step size (Song et al. 2020).
+diff --git a/taugennet/src/inference.py b/taugennet/src/inference.py
+index ff18bb9..b1bf896 100644
+--- a/taugennet/src/inference.py
++++ b/taugennet/src/inference.py
+@@ -124,11 +124,11 @@ def synthesize_tau_pet(mri_vol, cond_data, ae, unet, schedule, encode_cond,
+         c      = encode_cond(cond_b)
+         zt     = torch.randn_like(zm)
+         for i, t_idx in enumerate(tqdm(ts, desc=f"Denoising [{start}:{start+len(mri_b)}]", leave=False)):
++            t_prev = ts[i + 1] if i + 1 < len(ts) else -1
+             if sampler == 'ddim':
+-                t_prev = ts[i + 1] if i + 1 < len(ts) else -1
+                 zt = schedule.ddim_sample(unet, zt, t_idx, t_prev, zm, c)
+-            else:
+-                zt = schedule.p_sample(unet, zt, t_idx, zm, c)
++            else:   # respaced DDPM: valid for n_steps < T_STEPS (p_sample assumed t → t−1)
++                zt = schedule.p_sample_respaced(unet, zt, t_idx, t_prev, zm, c)
+         out_chunks.append(ae.decode(zt * latent_std).cpu())
+ 
+     return torch.cat(out_chunks, dim=0)
