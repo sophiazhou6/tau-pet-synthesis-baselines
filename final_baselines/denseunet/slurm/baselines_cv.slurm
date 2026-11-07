@@ -92,8 +92,8 @@ if step val; then
   $PYTHON - "$MANIFEST" "$TAG" "$FOLD" <<'PACKPY' || echo "WARN: val-pack failed (prune_checkpoints will catch it)"
 import os, sys
 sys.path.insert(0, os.getcwd()); sys.path.insert(0, os.path.join(os.getcwd(), "scripts"))
-from training.config import GEN_ROOT
-from training import predictions as preds
+from denseunet.config import GEN_ROOT
+from denseunet import predictions as preds
 from train_baseline import resolve_manifest, run_dir
 manifest, tag, fold = sys.argv[1], sys.argv[2], sys.argv[3]
 d = run_dir(GEN_ROOT, resolve_manifest(manifest), tag, None if fold == "none" else int(fold)) + "_val"

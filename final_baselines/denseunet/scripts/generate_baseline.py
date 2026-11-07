@@ -15,10 +15,10 @@ import numpy as np
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from training.config import CKPT_ROOT, GEN_ROOT, N_FOLDS  # noqa: E402
-from training.cohort import build_cohort  # noqa: E402
-from training import registry  # noqa: E402
-from training import predictions as preds  # noqa: E402
+from denseunet.config import CKPT_ROOT, GEN_ROOT, N_FOLDS  # noqa: E402
+from denseunet.cohort import build_cohort  # noqa: E402
+from denseunet import registry  # noqa: E402
+from denseunet import predictions as preds  # noqa: E402
 from train_baseline import cohort_name, resolve_manifest, run_dir  # noqa: E402
 
 

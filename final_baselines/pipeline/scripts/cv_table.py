@@ -25,7 +25,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from training.config import RECORDS_ROOT  # noqa: E402
+from denseunet.config import RECORDS_ROOT  # noqa: E402
 from report_run import dk86_voxel_counts, regional_stats  # noqa: E402
 
 LEVELS = [("Voxel-level (SET1)", "pooled_wholebrain_atrophy.csv"),

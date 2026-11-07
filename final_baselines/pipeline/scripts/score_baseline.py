@@ -3,7 +3,7 @@
 Score cached predictions of one run/fold with the lab's evaluation pipeline from
 github.com/sophiazhou6/tau-pet-synthesis-baselines (--pipeline github, the default):
 
-  1. training/gh_align.py (under the GitHub taugennet root): rebuilds the held-out test set
+  1. denseunet/gh_align.py (under the GitHub taugennet root): rebuilds the held-out test set
      with the GitHub loader, verifies it equals the manifest's heldout_test rows in the same
      order, and writes per_subject_wholebrain.csv (analysis/make_per_subject.py convention).
   2. taugennet/scripts/evaluate_final.py --use-cached, invoked exactly as
@@ -34,10 +34,10 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from training.config import (FIGURES_ROOT, GEN_ROOT, GH_TAUGENNET, N_FOLDS, RECORDS_ROOT,  # noqa: E402
+from denseunet.config import (FIGURES_ROOT, GEN_ROOT, GH_TAUGENNET, N_FOLDS, RECORDS_ROOT,  # noqa: E402
                               REPO_ROOT, TAUGENNET_ROOT)
-from training import predictions as preds  # noqa: E402
-from training.cohort import read_manifest  # noqa: E402
+from denseunet import predictions as preds  # noqa: E402
+from denseunet.cohort import read_manifest  # noqa: E402
 from train_baseline import cohort_name, resolve_manifest, run_dir  # noqa: E402
 
 LOCAL_FILES = ["pooled_wholebrain_SUVR.csv", "region_pooled_SUVR.csv", "region_crosssubject_metrics_SUVR.csv",
@@ -64,7 +64,7 @@ def score_github(args, gen_dir, out_dir, fig_dir):
                    if args.use_controls_322 else [])
 
     print(f"[score/github] 1/3 alignment check + per-subject table (GitHub loader @ {GH_TAUGENNET})", flush=True)
-    subprocess.run([sys.executable, os.path.join(REPO_ROOT, "training", "gh_align.py"), "--manifest", args.manifest,
+    subprocess.run([sys.executable, os.path.join(REPO_ROOT, "denseunet", "gh_align.py"), "--manifest", args.manifest,
                     "--gen-dir", gen_dir, "--out-dir", out_dir, "--split", args.split] + fold_args + cohort_args,
                    env=env, check=True)
 
@@ -122,7 +122,7 @@ def _safe_r(a, b):
 
 
 def score_local(args, gen_dir, out_dir, fig_dir):
-    from training.cohort import build_cohort
+    from denseunet.cohort import build_cohort
     ef = _load_module(os.path.join(TAUGENNET_ROOT, "scripts", "evaluate_final.py"), "evaluate_final_mod")
     from src.dataset_final import unnormalize  # noqa: E402
     from denseunet import figs  # noqa: E402

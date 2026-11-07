@@ -16,7 +16,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from training.config import CKPT_ROOT  # noqa: E402
+from denseunet.config import CKPT_ROOT  # noqa: E402
 
 
 def best_epoch_per_round(history):
