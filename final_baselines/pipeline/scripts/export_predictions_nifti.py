@@ -28,7 +28,7 @@ import sys
 import numpy as np
 import nibabel as nib
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 from denseunet.config import GEN_ROOT, RESULTS_DIR, VOL_SHAPE  # noqa: E402
 from denseunet.cohort import build_cohort  # noqa: E402
 from denseunet import predictions as preds  # noqa: E402

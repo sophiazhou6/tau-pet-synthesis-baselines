@@ -23,7 +23,7 @@ import sys
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from denseunet.config import RECORDS_ROOT  # noqa: E402
 from report_run import dk86_voxel_counts, regional_stats  # noqa: E402

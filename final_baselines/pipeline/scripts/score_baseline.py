@@ -3,7 +3,7 @@
 Score cached predictions of one run/fold with the lab's evaluation pipeline from
 github.com/sophiazhou6/tau-pet-synthesis-baselines (--pipeline github, the default):
 
-  1. denseunet/gh_align.py (under the GitHub taugennet root): rebuilds the held-out test set
+  1. src/denseunet/gh_align.py (under the GitHub taugennet root): rebuilds the held-out test set
      with the GitHub loader, verifies it equals the manifest's heldout_test rows in the same
      order, and writes per_subject_wholebrain.csv (analysis/make_per_subject.py convention).
   2. taugennet/scripts/evaluate_final.py --use-cached, invoked exactly as
@@ -33,7 +33,7 @@ import sys
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 from denseunet.config import (FIGURES_ROOT, GEN_ROOT, GH_TAUGENNET, N_FOLDS, RECORDS_ROOT,  # noqa: E402
                               REPO_ROOT, TAUGENNET_ROOT)
 from denseunet import predictions as preds  # noqa: E402
@@ -64,7 +64,7 @@ def score_github(args, gen_dir, out_dir, fig_dir):
                    if args.use_controls_322 else [])
 
     print(f"[score/github] 1/3 alignment check + per-subject table (GitHub loader @ {GH_TAUGENNET})", flush=True)
-    subprocess.run([sys.executable, os.path.join(REPO_ROOT, "denseunet", "gh_align.py"), "--manifest", args.manifest,
+    subprocess.run([sys.executable, os.path.join(REPO_ROOT, "src", "denseunet", "gh_align.py"), "--manifest", args.manifest,
                     "--gen-dir", gen_dir, "--out-dir", out_dir, "--split", args.split] + fold_args + cohort_args,
                    env=env, check=True)
 

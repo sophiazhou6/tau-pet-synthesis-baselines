@@ -15,14 +15,14 @@ point to the Adroit cluster. No ADNI data, subject IDs, checkpoints or predictio
 
 | | Dense-U-Net (MRI only) | TauGenNet (MRI + plasma p-tau217) |
 |---|---|---|
-| Model | `denseunet/denseunet/model.py` | `taugennet/src/models.py` (autoencoder, denoising U-Net), `taugennet/src/conditioning.py` (`PTau217Conditioner`: frozen CLIP, prompt "Plasma is X.XXX.") |
-| Training | `denseunet/scripts/train_baseline.py --model denseunet_paper` (settings in `denseunet/denseunet/registry.py`, round schedule in `denseunet/denseunet/trainers/regression.py`) | `taugennet/scripts/train.py --mode ptau217` (autoencoder first, then diffusion) |
+| Model | `denseunet/src/denseunet/model.py` | `taugennet/src/models.py` (autoencoder, denoising U-Net), `taugennet/src/conditioning.py` (`PTau217Conditioner`: frozen CLIP, prompt "Plasma is X.XXX.") |
+| Training | `denseunet/scripts/train_baseline.py --model denseunet_paper` (settings in `denseunet/src/denseunet/registry.py`, round schedule in `denseunet/src/denseunet/trainers/regression.py`) | `taugennet/scripts/train.py --mode ptau217` (autoencoder first, then diffusion) |
 | Prediction | `denseunet/scripts/generate_baseline.py` | `taugennet/scripts/evaluate_final.py --mode ptau217 --n-steps 500` (sampler in `taugennet/src/inference.py`, `src/diffusion.py`) |
 | Job script | `denseunet/slurm/baselines_cv.slurm` (5 folds), `denseunet/slurm/denseunet_refit.slurm` (final model) | `taugennet/slurm/taugennet_paper.slurm` (folds and final model) |
 
 Used by both models:
 - Data loading: `taugennet/src/dataset_final.py`, with the DK86 atlas from `taugennet/src/atlas_labels.py`.
-- CV folds: `taugennet/src/splits.py` for TauGenNet and `denseunet/denseunet/cohort.py` for Dense-U-Net. Both use
+- CV folds: `taugennet/src/splits.py` for TauGenNet and `denseunet/src/denseunet/cohort.py` for Dense-U-Net. Both use
   the same rule and seed (42), so the folds hold the same subjects.
 - Plasma: `pipeline/scripts/impute_plasma.py`. MICE is fitted per split on that split's training subjects only.
 - Scoring: `pipeline/scripts/score_baseline.py`, which calls `taugennet/scripts/evaluate_final.py`.
@@ -45,30 +45,25 @@ Used by both models:
 On the cluster the code ran from two folders, and the imports and job scripts assume that layout:
 - `denseunet/` and `pipeline/` were one folder, `/scratch/network/sz3962/tau-denseunet-baseline/`, with
   `baselines/`, `denseunet/`, `scripts/` and `slurm/` side by side. The scripts in `pipeline/scripts/` import
-  the `denseunet` package and `train_baseline` from `denseunet/`, so to run them, put the contents of
-  `denseunet/` and `pipeline/` back into one folder.
+  the `denseunet` package (from `denseunet/src/`) and `train_baseline` (from `denseunet/scripts/`), so to run
+  them, put the contents of `denseunet/` and `pipeline/` back into one folder.
 - `taugennet/` was `/scratch/network/sz3962/tau-pet-synthesis-baselines/taugennet/`.
 
 ## Folder layout
 
-`denseunet/` is laid out like `taugennet/`: the library code in one folder, plus `scripts/` and `slurm/`.
+`denseunet/` is laid out like `taugennet/`: `src/` for the library code, plus `scripts/` and `slurm/`.
 
-| | Dense-U-Net | TauGenNet |
-|---|---|---|
-| Library code | `denseunet/denseunet/` | `taugennet/src/` |
-| Scripts | `denseunet/scripts/` | `taugennet/scripts/` |
-| Job scripts | `denseunet/slurm/` | `taugennet/slurm/` |
-
-The Dense-U-Net library folder can't also be called `src`: its code imports TauGenNet's `src` (data loader,
-settings), and two packages with the same name would clash. `denseunet/denseunet/` holds the network
-(`model.py`), the model settings (`registry.py`), the training loop with the round schedule (`trainers/`), the
-cohort and CV folds (`cohort.py`), cluster paths (`config.py`), saved-prediction packing (`predictions.py`), a
-scoring helper (`gh_align.py`) and figure helpers (`figs.py`).
+The Dense-U-Net library sits one level deeper, in `denseunet/src/denseunet/`, so that its code is imported as
+`denseunet` and does not clash with TauGenNet's `src`, which it also imports (data loader, settings). It holds
+the network (`model.py`), the model settings (`registry.py`), the training loop with the round schedule
+(`trainers/`), the cohort and CV folds (`cohort.py`), cluster paths (`config.py`), saved-prediction packing
+(`predictions.py`), a scoring helper (`gh_align.py`) and figure helpers (`figs.py`).
 
 ## Changes from the code that ran
 
-- On the cluster the training code was in a separate folder, `baselines/` (it was written to train several
-  baseline models). Here it is merged into `denseunet/denseunet/`; only the import lines that name it changed,
+- On the cluster the Dense-U-Net code was in two folders at the top of the repo, `denseunet/` and `baselines/`
+  (the training code, written to train several baseline models). Here both are in `denseunet/src/denseunet/`.
+  Only the lines that name or locate that folder changed (imports, `sys.path` lines, `REPO_ROOT` in `config.py`),
   and the package's `__init__.py` now lists its files.
 - The other baselines it held (Swin UNETR, Ea-GAN, CT2PET, JointSyn) were not used in these runs and are removed:
   their files, their entries in `registry.py`, and the Swin UNETR branch in `trainers/regression.py`.

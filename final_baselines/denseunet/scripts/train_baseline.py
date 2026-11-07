@@ -23,7 +23,7 @@ import time
 import numpy as np
 import torch
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 from denseunet.config import CKPT_ROOT, MANIFEST_DIR, N_FOLDS, SEED  # noqa: E402
 from denseunet.cohort import build_cohort  # noqa: E402
 from denseunet import registry  # noqa: E402

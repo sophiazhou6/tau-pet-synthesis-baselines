@@ -11,7 +11,7 @@ for _p in (TAUGENNET_ROOT, os.path.join(TAUGENNET_ROOT, "scripts")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-REPO_ROOT    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO_ROOT    = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 RESULTS_DIR  = os.path.join(REPO_ROOT, "results")
 CKPT_ROOT    = os.path.join(RESULTS_DIR, "checkpoints", "baselines")
 GEN_ROOT     = os.path.join(RESULTS_DIR, "generated", "baselines")

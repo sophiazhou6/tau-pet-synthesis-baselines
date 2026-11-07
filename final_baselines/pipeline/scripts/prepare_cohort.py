@@ -58,7 +58,7 @@ import sys
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 from denseunet.config import MANIFEST_DIR, SEED, TAUGENNET_ROOT  # noqa: E402
 from denseunet.cohort import GROUP_ORDER, POOL_SPLITS, norm_rid, norm_split  # noqa: E402
 

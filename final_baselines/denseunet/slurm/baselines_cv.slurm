@@ -91,7 +91,7 @@ if step val; then
   # fold's directory: other folds of the same model may still be writing theirs
   $PYTHON - "$MANIFEST" "$TAG" "$FOLD" <<'PACKPY' || echo "WARN: val-pack failed (prune_checkpoints will catch it)"
 import os, sys
-sys.path.insert(0, os.getcwd()); sys.path.insert(0, os.path.join(os.getcwd(), "scripts"))
+sys.path.insert(0, os.path.join(os.getcwd(), "src")); sys.path.insert(0, os.path.join(os.getcwd(), "scripts"))
 from denseunet.config import GEN_ROOT
 from denseunet import predictions as preds
 from train_baseline import resolve_manifest, run_dir
