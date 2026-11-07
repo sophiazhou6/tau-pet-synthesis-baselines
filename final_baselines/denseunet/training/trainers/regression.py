@@ -22,7 +22,6 @@ from torch.utils.data import DataLoader
 
 from .base import BaseTrainer, masked_mse, warmup_cosine_lambda
 from ..models.denseunet import DenseUNet3D
-from ..models.swin_unetr import SwinUNETRRegressor
 
 
 class RegressionTrainer(BaseTrainer):
@@ -38,9 +37,6 @@ class RegressionTrainer(BaseTrainer):
                         torch.nn.init.xavier_uniform_(m.weight)
                         if m.bias is not None:
                             torch.nn.init.zeros_(m.bias)
-        elif a.model == "swinunetr":
-            net = SwinUNETRRegressor(in_ch=1, out_ch=1, feature_size=a.swin_feature_size,
-                                     drop_path_rate=a.swin_drop_path, use_checkpoint=a.swin_checkpoint)
         else:
             raise ValueError(a.model)
         self.nets["G"] = net.to(self.device)

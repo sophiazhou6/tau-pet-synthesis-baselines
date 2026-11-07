@@ -12,7 +12,7 @@ scripts/score_baseline.py. Two jobs:
 2. per_subject_wholebrain.csv in the convention of the repo's analysis/make_per_subject.py:
    subject_idx, RID, group, pearson/mse/rmse/mae over the DK86 mask in SUVR space.
 
-Standalone on purpose (no `baselines` imports): the local and GitHub taugennet trees both
+Standalone on purpose (no `training` imports): the local and GitHub taugennet trees both
 provide a top-level package named `src`, so the GitHub one must be imported in its own process.
 """
 import argparse

@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from baselines.config import RECORDS_ROOT  # noqa: E402
+from training.config import RECORDS_ROOT  # noqa: E402
 
 GH = "/scratch/network/sz3962/tau-pet-synthesis-baselines/taugennet"
 FLUID_CSV = "/scratch/network/sz3962/taugennet/data/raw/ADNI34Tau_withFluidBiomarkers.csv"

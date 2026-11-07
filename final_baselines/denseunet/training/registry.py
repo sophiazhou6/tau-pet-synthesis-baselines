@@ -41,11 +41,6 @@ MODELS = {
         defaults=dict(epochs=150, patience=6, batch_size=2, lr=1e-4, weight_decay=0.0, optimizer="adam",
                       augment=False, schedule="upstream_rounds", loss="mse_full", init="glorot",
                       rounds=10, round_epochs=15, round_lr_decay=0.5)),
-    "swinunetr": dict(
-        trainer=RegressionTrainer,
-        description="Swin UNETR (MONAI) regression head, AdamW 1e-4 wd 1e-5 warmup-cosine, AMP, masked MSE",
-        defaults=dict(epochs=300, patience=40, batch_size=2, lr=1e-4, weight_decay=1e-5, optimizer="adamw",
-                      schedule="warmup_cosine", warmup_frac=0.1, amp=True, augment=True)),
 }
 
 

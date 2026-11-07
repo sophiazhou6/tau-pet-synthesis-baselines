@@ -10,7 +10,7 @@ $TAUGENNET_ROOT/data/manifests/<name>.csv). Checkpoints go to
 results/checkpoints/baselines/<cohort>/<tag>/fold_<i>/{best,last}.pt (+ history.json); the
 run refuses to overwrite an existing best.pt unless --overwrite is given.
 
-Every hyperparameter has a per-model default (baselines/registry.py) and can be overridden
+Every hyperparameter has a per-model default (training/registry.py) and can be overridden
 on the command line; `--print-config` shows the resolved configuration and exits.
 """
 import argparse
@@ -24,9 +24,9 @@ import numpy as np
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from baselines.config import CKPT_ROOT, MANIFEST_DIR, N_FOLDS, SEED  # noqa: E402
-from baselines.cohort import build_cohort  # noqa: E402
-from baselines import registry  # noqa: E402
+from training.config import CKPT_ROOT, MANIFEST_DIR, N_FOLDS, SEED  # noqa: E402
+from training.cohort import build_cohort  # noqa: E402
+from training import registry  # noqa: E402
 
 
 def resolve_manifest(m):

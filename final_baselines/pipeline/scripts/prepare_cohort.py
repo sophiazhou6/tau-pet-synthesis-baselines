@@ -59,8 +59,8 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from baselines.config import MANIFEST_DIR, SEED, TAUGENNET_ROOT  # noqa: E402
-from baselines.cohort import GROUP_ORDER, POOL_SPLITS, norm_rid, norm_split  # noqa: E402
+from training.config import MANIFEST_DIR, SEED, TAUGENNET_ROOT  # noqa: E402
+from training.cohort import GROUP_ORDER, POOL_SPLITS, norm_rid, norm_split  # noqa: E402
 
 RAW = os.path.join(TAUGENNET_ROOT, "data", "raw")
 GROUP_ALIASES = {"CN": "CN", "NC": "CN", "NL": "CN", "HC": "CN", "NORMAL": "CN", "CONTROL": "CN", "CONTROLS": "CN",

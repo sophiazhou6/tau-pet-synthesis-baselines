@@ -1,9 +1,9 @@
 """
-baselines — model-agnostic MRI → tau-PET synthesis baselines for the TauGenNet manuscript.
+training — model-agnostic MRI → tau-PET synthesis baselines for the TauGenNet manuscript.
 
 Every model here is trained, generated and scored through the same three entry points
 (scripts/train_baseline.py, scripts/generate_baseline.py, scripts/score_baseline.py) on a
-manifest-driven cohort (baselines/cohort.py) that reuses TauGenNet's dataset class and
+manifest-driven cohort (training/cohort.py) that reuses TauGenNet's dataset class and
 split policy, and scored with TauGenNet's evaluate_final.py metric functions — so every
 number is directly comparable to the TauGenNet / Dense-U-Net results already in the paper.
 

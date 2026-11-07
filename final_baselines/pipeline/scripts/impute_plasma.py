@@ -41,7 +41,7 @@ from sklearn.linear_model import BayesianRidge
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from baselines.cohort import fold_indices, read_manifest  # noqa: E402
+from training.cohort import fold_indices, read_manifest  # noqa: E402
 from train_baseline import resolve_manifest  # noqa: E402
 
 DATA = os.path.join(os.environ.get("TAUGENNET_ROOT", "/scratch/network/sz3962/taugennet"), "data", "raw_v2")

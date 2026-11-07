@@ -29,9 +29,9 @@ import numpy as np
 import nibabel as nib
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from baselines.config import GEN_ROOT, RESULTS_DIR, VOL_SHAPE  # noqa: E402
-from baselines.cohort import build_cohort  # noqa: E402
-from baselines import predictions as preds  # noqa: E402
+from training.config import GEN_ROOT, RESULTS_DIR, VOL_SHAPE  # noqa: E402
+from training.cohort import build_cohort  # noqa: E402
+from training import predictions as preds  # noqa: E402
 from train_baseline import resolve_manifest  # noqa: E402
 
 
